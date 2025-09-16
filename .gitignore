@@ -1,0 +1,13 @@
+db*/
+.venv/
+venv/
+.idea/
+**/_temp/
+patch_store/
+**/.os
+**/*.bin
+log*.txt
+logs/
+__pycache__/
+poc/
+.env
