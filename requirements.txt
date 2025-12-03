@@ -8,7 +8,7 @@ pefile==2024.8.26
 langchain==0.3.25
 langchain-chroma==0.2.4
 langchain-community==0.3.24
-langchain-core==0.3.60
+langchain-core==0.3.80
 langchain-mcp-adapters==0.1.7
 langchain-openai==0.3.16
 langchain-text-splitters==0.3.8
