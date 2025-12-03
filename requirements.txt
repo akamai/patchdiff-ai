@@ -7,7 +7,7 @@ requests-html==0.10.0
 pefile==2024.8.26
 langchain==0.3.25
 langchain-chroma==0.2.4
-langchain-community==0.3.24
+langchain-community==0.3.27
 langchain-core==0.3.60
 langchain-mcp-adapters==0.1.7
 langchain-openai==0.3.16
