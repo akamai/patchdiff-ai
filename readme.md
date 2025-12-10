@@ -1,7 +1,8 @@
 # PatchDiff-AI
 
 **LangGraph‑powered multi‑agent system that turns batches of CVE IDs into fully‑fledged root‑cause reports.**
-
+> [!TIP]
+> Read more about it [here](https://www.akamai.com/blog/security-research/patch-wednesday-root-cause-analysis-with-llms)
 ---
 
 ## Table of Contents
