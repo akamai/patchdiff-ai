@@ -30,10 +30,12 @@
 * **Deterministic supervision** – the top-level *Supervisor* node coordinates tool errors and time-outs so rogue sub-agents cannot derail the batch.  
 * **Extensible** – new analysis stages are a single node away (see [Extending the Graph](#extending-the-graph)).
 
-> **Supported OS:** **Windows only.** The system targets Microsoft Patch Tuesday updates, but contributors are welcome to extend it to other platforms (e.g., Android) or specific applications. It currently analyzes only CVEs that affect the host OS version.<br>
-> **Tested on:** **Windows 11 24H2 x64**; other versions *should* work.
+> [!NOTE]
+> **Supported OS: Windows only.** The system targets Microsoft Patch Tuesday updates, but contributors are welcome to extend it to other platforms (e.g., Android) or specific applications. It currently analyzes only CVEs that affect the host OS version.<br>
+> **Tested on: Windows 11 24H2 x64**; other versions *should* work.
 
-> ⚠ **Warning:** This project uses `chromadb`, which **has** a known crashing issue on some setups. If you **encounter** *Process finished with exit code -1073741819 (0xC0000005)*, the fault lies in `chromadb`/`HNSWlib`. Switch the virtual-machine engine or use a physical machine.
+> [!WARNING]  
+> This project uses `chromadb`, which **has** a known crashing issue on some setups. If you **encounter** *Process finished with exit code -1073741819 (0xC0000005)*, the fault lies in `chromadb`/`HNSWlib`. Switch the virtual-machine engine or use a physical machine.
 
 ---
 
@@ -55,8 +57,13 @@ Each **Agent** is a subgraph and operates independently. Anyone can extend the s
 | **BinExport** | ≥ 12            | IDA plugin that produces .BinDiff files |
 | **7-zip**     | ≥ 22            | Used to extract the update archives     |
 
+> [!IMPORTANT]
 > **Licensing:** IDA Pro is commercial. Buy a legal copy or fork this repo and extend it to Ghidra.
 
+> [!TIP]
+> This tool use Azure OpenAI models using environment variables `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_CLIENT_SECRET`.
+> Alternatively, use `DefaultAzureCredential` using Azure CLI `az login`. 
+> Or extend the project to use other models like `Claude`, `Gemini`, etc... (`LLM` class)
 ---
 
 ## Installation

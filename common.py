@@ -44,6 +44,9 @@ else:
         exclude_environment_credential=True
     )
 
+if not credential:
+    raise ValueError("Invalid Azure AI credentials")
+
 token_provider = get_bearer_token_provider(
     credential,
     "https://cognitiveservices.azure.com/.default",
