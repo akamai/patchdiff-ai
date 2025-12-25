@@ -42,7 +42,7 @@
 
 ## Architecture
 
-![Supervisor.png](Supervisor.png)
+![Supervisor.png](rsrc/arch.png)
 
 Each **Agent** is a subgraph and operates independently. Anyone can extend the system easily by containing the changes to the relevant graph.
 
