@@ -2,12 +2,13 @@ import dataclasses
 from pathlib import Path
 
 from langchain_core.runnables.graph import NodeStyles, CurveStyle, MermaidDrawMethod
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import AzureChatOpenAI
 from langgraph.graph.state import CompiledStateGraph
 import abc
 from langchain_core.runnables.graph_mermaid import draw_mermaid_png
 
-from common import LLM
+from common import LLM, AgentModels
 
 NEON_THEME = {
     "config": {
@@ -70,7 +71,7 @@ class Agent(abc.ABC):
                 f"{cls.__name__}.NODES fields must be 'str' – offending: {bad}"
             )
 
-    def __init__(self, llm: AzureChatOpenAI = LLM.mini, draw: bool = False):
+    def __init__(self, llm: BaseChatModel = AgentModels.default_model.model , draw: bool = False):
         self._llm = llm
         self._graph: CompiledStateGraph = None
         self._build()

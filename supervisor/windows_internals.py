@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from agent import Agent
 from agent_tools.vector_store import VectorStore
-from common import StateInfo, CveDetails, Candidates, LLM, logger, console
+from common import AgentModels, StateInfo, CveDetails, Candidates, LLM, logger, console
 from defaultdataclass import defaultdataclass
 from langgraph.constants import END
 
@@ -102,7 +102,7 @@ class WindowsInternals(Agent):
         rank = 'Rank relevancy'
 
     def __init__(self):
-        super().__init__(llm=LLM.mini)
+        super().__init__(llm=AgentModels.platform_internals_model.model)
         self.limit = 3
 
     def _build(self):
@@ -161,7 +161,7 @@ class WindowsInternals(Agent):
     async def rank(self, context: WindowsInternalsContext):
         context.state_info.node.append(self.NODES.rank)
 
-        chain = self.prompt_template.rank | LLM.o4_mini.with_structured_output(FileScoreList)
+        chain = self.prompt_template.rank | AgentModels.default_model.model.with_structured_output(FileScoreList)
 
         files = '\n\n'.join(f"name: {doc.metadata.get('name', '')}\n{doc.page_content}" for doc, _ in context.docs)
         metadata = json.dumps({k: v for k, v in context.cve_details.msrc_report.to_dict().items() if k != 'products'})

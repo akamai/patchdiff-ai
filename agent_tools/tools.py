@@ -25,7 +25,7 @@ async def generate_file_info_if_needed(base_path: Path, name: str, package: str)
         return
 
     desc = file_desc(base_path) or '' if base_path.exists() else ''
-    chain = DESC_PROMPT | LLM.nano
+    chain = DESC_PROMPT | LLM.nano.model
     result = await chain.ainvoke({"filename": name, 'package': package, "description": desc})
     logger.debug(result.content)
 

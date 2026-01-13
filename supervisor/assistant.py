@@ -15,7 +15,7 @@ from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplat
 from langgraph.graph import StateGraph
 from agent import Agent
 from agent_tools.vector_store import VectorStore
-from common import StateInfo, CveDetails, logger, Timer, LLM, resource_lock, console
+from common import StateInfo, CveDetails, logger, Timer, AgentModels
 from defaultdataclass import defaultdataclass, field
 from langgraph.constants import Send, END
 
@@ -96,7 +96,7 @@ class Chatbot(Agent):
         chatbot = "Chatbot"
 
     def __init__(self):
-        super().__init__(llm=LLM.nano)
+        super().__init__(llm=AgentModels.default_model.model)
 
     prompt_template = ChatPromptTemplate(
         input_variables=["filename", "package", "description"],
