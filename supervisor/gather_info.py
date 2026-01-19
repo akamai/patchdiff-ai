@@ -8,6 +8,8 @@ from typing import Annotated
 
 import polars as pl
 from pathlib import Path
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from openai import RateLimitError
 
 from langchain_core.documents import Document
 from langchain_core.messages import SystemMessage
@@ -15,7 +17,7 @@ from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplat
 from langgraph.graph import StateGraph
 from agent import Agent
 from agent_tools.vector_store import VectorStore
-from common import StateInfo, CveDetails, logger, Timer, LLM, resource_lock, console
+from common import AgentModels, StateInfo, CveDetails, logger, Timer, console
 from defaultdataclass import defaultdataclass, field
 from langgraph.constants import Send, END
 
@@ -99,7 +101,7 @@ class GatherInfo(Agent):
         update_vs = "Update vecotrstore"
 
     def __init__(self):
-        super().__init__(llm=LLM.nano)
+        super().__init__(llm=AgentModels.gather_info_model.model)
 
     prompt_template = ChatPromptTemplate(
         input_variables=["filename", "package", "description"],
@@ -294,12 +296,20 @@ class GatherInfo(Agent):
                 desc = file_desc(base) or '_' if base.exists() else '_'
 
                 chain = self.prompt_template | self.get_llm()
-                result = await chain.ainvoke({"filename": name, 'package': package, "description": desc})
+                result = await self._invoke_with_retry(chain, name, package, desc)
                 logger.debug(result.content)
 
                 doc = Document(page_content=result.content or '',
                                metadata={'name': name.lower(), 'package': package.lower(), 'description': desc.lower()})
                 await VectorStore.file_info.aadd_documents(documents=[doc], ids=[str(uuid.uuid4())])
+
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=5, min=1, max=60),
+        retry=retry_if_exception_type(RateLimitError)
+    )
+    async def _invoke_with_retry(self, chain, name, package, desc):
+        return await chain.ainvoke({"filename": name, 'package': package, "description": desc})
 
     def update_vector_store(self, context: GatherInfoContext):
         ''' Placeholder node '''
