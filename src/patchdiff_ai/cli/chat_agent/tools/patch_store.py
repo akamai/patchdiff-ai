@@ -49,4 +49,5 @@ def register(cat: ToolCatalogue, ctx: AppContext) -> None:
         "List binaries under db/patch_store/ — pass an absolute path to idalib_open.",
         {"type": "object", "properties": {}, "required": []},
         list_patch_store,
+        tags=["data", "binary"],
     )

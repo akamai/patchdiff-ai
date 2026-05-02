@@ -1,4 +1,9 @@
-"""CVRF platform picking. No `input()` — picking is now a pure function."""
+"""MSRC CVRF helpers for Patch Tuesday batch enumeration.
+
+Moved from the now-defunct top-level `patches/platform_filter.py`. Lives
+inside the windows plugin because Patch Tuesday is an MSRC-only concept.
+The `windows month` Click command (in `cli.py`) is the only consumer.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +17,21 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
+MONTH_RE = re.compile(
+    r"^\d{4}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$",
+    re.IGNORECASE,
+)
 TOKEN = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_month(value: str) -> str:
+    """Validate and canonicalise a `YYYY-MMM` Patch Tuesday tag."""
+    if not MONTH_RE.match(value):
+        raise ValueError(
+            "Invalid month format; expected YYYY-MMM (e.g. 2025-Jul)"
+        )
+    year, mon = value.split("-")
+    return f"{year}-{mon.capitalize()}"
 
 
 def words(text: str) -> list[str]:
@@ -43,8 +62,8 @@ def pick_ids(
     query: str | None,
     ids: set[str],
 ) -> tuple[set[str], list[str]]:
-    """Pure version of legacy `pick_ids`: never prompts; if query is ambiguous,
-    selects the highest-scoring match."""
+    """Pure picker: never prompts; if `query` is ambiguous, picks the
+    highest-scoring product by token overlap."""
     name_by_id = {p["ProductID"]: p["Value"] for p in cvrf["ProductTree"]["FullProductName"]}
     chosen_names = [name_by_id[i] for i in ids if i in name_by_id]
 

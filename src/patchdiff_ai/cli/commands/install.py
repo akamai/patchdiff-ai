@@ -1,19 +1,16 @@
-"""`patchdiff-ai install <subject>` — bootstrap external IDA assets.
+"""`patchdiff-ai install` — bootstrap external assets.
 
-Two subjects:
+Three modes:
 
-* `idalib` — locates the bundled `idapro-*-py3-none-any.whl` inside the
-  resolved IDA install's `idalib/python/` folder and pip-installs it into
-  the current environment. Then runs `py-activate-idalib.py` so the package
-  knows where its IDA Pro is. Without this, the new MCP-backed RE agent and
-  the chat MCP tools fall back to the legacy subprocess path.
-
-* `ida-plugins` — copies the bundled BinDiff / BinExport DLLs from
-  `resources/bindiff_ida_9.3/` into the resolved IDA install's `plugins/`
-  folder. Idempotent: same-content copies are skipped.
-
-Both default to acting on the *newest* discovered IDA install. Pass
-`--ida-root <path>` to target a specific one.
+* `patchdiff-ai install` (no subcommand) — aggregate: runs every
+  registered `PlatformProvider.install()`, then suggests `idalib` /
+  `ida-plugins` if those tools are missing.
+* `patchdiff-ai install idalib` — locate the bundled
+  `idapro-*-py3-none-any.whl` inside the resolved IDA install's
+  `idalib/python/` and pip-install it. Then run `py-activate-idalib.py`.
+* `patchdiff-ai install ida-plugins` — copy bundled BinDiff / BinExport
+  DLLs from `resources/bindiff_ida_9.3/` into the resolved IDA install's
+  `plugins/` folder. Idempotent.
 """
 
 from __future__ import annotations
@@ -24,16 +21,15 @@ import sys
 from hashlib import sha256
 from pathlib import Path
 
-import typer
+import click
 
 from patchdiff_ai.config.tools import (
     IdaInstall,
     discover_ida_installs,
     select_ida_install,
 )
+from patchdiff_ai.platforms import providers
 from patchdiff_ai.runtime.paths import BUNDLED_BINDIFF_DIR
-
-app = typer.Typer(no_args_is_help=True)
 
 
 _PLUGIN_FILES = ("bindiff8_ida64.dll", "binexport12_ida64.dll")
@@ -44,98 +40,111 @@ def _resolve_target(ida_root: Path | None) -> IdaInstall:
         for inst in discover_ida_installs():
             if inst.root.resolve() == ida_root.resolve():
                 return inst
-        raise typer.BadParameter(
+        raise click.BadParameter(
             f"{ida_root} is not a recognised IDA install (no idat.exe / idat64.exe found)."
         )
     inst = select_ida_install(discover_ida_installs())
     if inst is None:
-        raise typer.BadParameter(
+        raise click.BadParameter(
             "No IDA install found. Pass --ida-root or set TOOLS__IDA in .env."
         )
     return inst
 
 
-@app.command("idalib")
-def install_idalib(
-    ida_root: Path = typer.Option(
-        None,
-        "--ida-root",
-        help="Target IDA install root. Defaults to the newest discovered install.",
-    ),
-) -> None:
-    """Install `idapro` (idalib's Python wrapper) from the IDA install's bundled wheel."""
+@click.group(
+    "install",
+    help="Install prerequisites for every registered platform (or a specific component).",
+    invoke_without_command=True,
+)
+@click.pass_context
+def install_group(ctx: click.Context) -> None:
+    """No subcommand → aggregate over every registered provider."""
+    if ctx.invoked_subcommand is not None:
+        return
+    failures: list[str] = []
+    for provider in providers():
+        click.echo(f"\n--- {provider.name} ---")
+        try:
+            provider.install()
+        except Exception as exc:
+            click.echo(f"[!] {provider.name} install failed: {exc}")
+            failures.append(provider.name)
+    if failures:
+        raise click.exceptions.Exit(code=1)
+    click.echo("\n[+] platform installs complete (run `patchdiff-ai install idalib` / "
+               "`install ida-plugins` if you also need IDA assets)")
+
+
+@install_group.command("idalib", help="Install `idapro` (idalib's Python wrapper) from IDA's bundled wheel.")
+@click.option(
+    "--ida-root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Target IDA install root. Defaults to the newest discovered install.",
+)
+def install_idalib(ida_root: Path | None) -> None:
     inst = _resolve_target(ida_root)
     if not inst.has_idalib:
-        raise typer.BadParameter(
+        raise click.BadParameter(
             f"{inst.root} doesn't ship idalib (need IDA 9.0+). Use --ida-root to pick a 9.x install."
         )
     py_dir = inst.idalib_python_dir
     assert py_dir is not None  # has_idalib gates this
 
-    # Prefer the bundled wheel when present (9.3+ layout); fall back to
-    # editable-installing the source tree (9.0 setup.py layout).
     wheels = sorted(py_dir.glob("idapro-*-py3-none-any.whl"))
     if wheels:
         target = str(wheels[-1])
-        typer.echo(f"[*] Installing {wheels[-1].name} from {py_dir}")
+        click.echo(f"[*] Installing {wheels[-1].name} from {py_dir}")
     elif (py_dir / "setup.py").is_file():
         target = str(py_dir)
-        typer.echo(f"[*] Installing idalib (setup.py) from {py_dir}")
+        click.echo(f"[*] Installing idalib (setup.py) from {py_dir}")
     else:
-        raise typer.BadParameter(
-            f"No idapro wheel or setup.py found under {py_dir}."
-        )
+        raise click.BadParameter(f"No idapro wheel or setup.py found under {py_dir}.")
 
-    # `pip install` into the current interpreter. Using `python -m pip` so we
-    # honour whatever venv the user is running under.
     rc = subprocess.run(
         [sys.executable, "-m", "pip", "install", "--upgrade", target],
         check=False,
     ).returncode
     if rc != 0:
-        raise typer.Exit(rc)
+        raise click.exceptions.Exit(code=rc)
 
-    # Run the activation script so `idapro` knows where its IDA install is.
     activate = py_dir / "py-activate-idalib.py"
     if activate.is_file():
-        typer.echo(f"[*] Activating idalib against {inst.root}")
+        click.echo(f"[*] Activating idalib against {inst.root}")
         rc = subprocess.run(
             [sys.executable, str(activate), "-d", str(inst.root)],
             check=False,
         ).returncode
         if rc != 0:
-            typer.echo(
+            click.echo(
                 f"[!] py-activate-idalib.py exited with rc={rc}; idalib may not be wired up."
             )
-            raise typer.Exit(rc)
+            raise click.exceptions.Exit(code=rc)
 
-    typer.echo("[+] idalib install complete.")
+    click.echo("[+] idalib install complete.")
 
 
-@app.command("ida-plugins")
-def install_ida_plugins(
-    ida_root: Path = typer.Option(
-        None,
-        "--ida-root",
-        help="Target IDA install root. Defaults to the newest discovered install.",
-    ),
-) -> None:
-    """Copy bundled BinDiff/BinExport DLLs into IDA's plugins folder (idempotent)."""
+@install_group.command("ida-plugins", help="Copy bundled BinDiff/BinExport DLLs into IDA's plugins folder.")
+@click.option(
+    "--ida-root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Target IDA install root. Defaults to the newest discovered install.",
+)
+def install_ida_plugins(ida_root: Path | None) -> None:
     inst = _resolve_target(ida_root)
     if not BUNDLED_BINDIFF_DIR.is_dir():
-        raise typer.BadParameter(
-            f"Bundled plugin folder missing: {BUNDLED_BINDIFF_DIR}"
-        )
+        raise click.BadParameter(f"Bundled plugin folder missing: {BUNDLED_BINDIFF_DIR}")
     plugins_dir = inst.plugins_dir
     plugins_dir.mkdir(parents=True, exist_ok=True)
-    typer.echo(f"[*] Target: {plugins_dir}")
+    click.echo(f"[*] Target: {plugins_dir}")
 
     copied: list[str] = []
     skipped: list[str] = []
     for name in _PLUGIN_FILES:
         src = BUNDLED_BINDIFF_DIR / name
         if not src.is_file():
-            typer.echo(f"  ! source missing: {src}")
+            click.echo(f"  ! source missing: {src}")
             continue
         dst = plugins_dir / name
         if dst.is_file() and _hash(src) == _hash(dst):
@@ -145,10 +154,10 @@ def install_ida_plugins(
         copied.append(name)
 
     for name in copied:
-        typer.echo(f"  + {name}")
+        click.echo(f"  + {name}")
     for name in skipped:
-        typer.echo(f"  = {name} (already up-to-date)")
-    typer.echo("[+] ida-plugins install complete.")
+        click.echo(f"  = {name} (already up-to-date)")
+    click.echo("[+] ida-plugins install complete.")
 
 
 def _hash(path: Path) -> str:

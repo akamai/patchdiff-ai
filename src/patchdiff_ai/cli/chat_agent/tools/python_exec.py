@@ -18,6 +18,8 @@ from typing import Any
 import structlog
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.text import Text
 
 from ..catalogue import ToolCatalogue
 
@@ -25,6 +27,58 @@ from ..catalogue import ToolCatalogue
 log = structlog.get_logger(__name__)
 
 _console = Console()
+
+_SNAPSHOT_MAX_LINES = 20
+
+
+def _render_snapshot(stdout: str, stderr: str) -> None:
+    """Print a tinted-background snapshot of stdout/stderr (≤20 lines).
+
+    Uses `rich.text.Text` (not markup) so brackets in user output
+    aren't reinterpreted. The full body is still returned to the
+    assistant via the tool envelope; the snapshot is for the human
+    in the terminal.
+    """
+    if not stdout and not stderr:
+        return
+
+    out_lines = stdout.splitlines() if stdout else []
+    err_lines = stderr.splitlines() if stderr else []
+    total = len(out_lines) + len(err_lines)
+
+    text = Text()
+    remaining = _SNAPSHOT_MAX_LINES
+
+    if out_lines and remaining > 0:
+        take = min(len(out_lines), remaining)
+        text.append("\n".join(out_lines[:take]))
+        remaining -= take
+
+    if err_lines and remaining > 0:
+        if out_lines:
+            text.append("\n-- stderr --\n", style="bold red")
+        take = min(len(err_lines), remaining)
+        text.append("\n".join(err_lines[:take]), style="red")
+        remaining -= take
+
+    if total > _SNAPSHOT_MAX_LINES:
+        text.append(
+            f"\n... ({total - _SNAPSHOT_MAX_LINES} more line(s); "
+            "full content returned to assistant)",
+            style="dim italic",
+        )
+
+    _console.print(
+        Panel(
+            text,
+            title="[dim]python_exec output[/dim]",
+            title_align="left",
+            border_style="grey50",
+            style="on grey15",
+            expand=False,
+            padding=(0, 1),
+        )
+    )
 
 
 def register(cat: ToolCatalogue) -> None:
@@ -41,7 +95,7 @@ def register(cat: ToolCatalogue) -> None:
         _console.print(Markdown(f"```python\n{code}\n```"))
         try:
             answer = _console.input(
-                "[bold yellow]Execute this Python?[/] \\[y/N\\] "
+                "[bold yellow]Execute this Python?[/] \\[y/N] "
             ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             answer = ""
@@ -68,6 +122,7 @@ def register(cat: ToolCatalogue) -> None:
         except SystemExit as exc:
             # sys.exit() inside a snippet must not kill the chat process.
             log.warning("python_exec_system_exit", code_arg=exc.code)
+            _render_snapshot(buf_out.getvalue(), buf_err.getvalue())
             return {
                 "kind": "error",
                 "error": (
@@ -79,6 +134,7 @@ def register(cat: ToolCatalogue) -> None:
             }
         except KeyboardInterrupt:
             log.info("python_exec_interrupted")
+            _render_snapshot(buf_out.getvalue(), buf_err.getvalue())
             return {
                 "kind": "interrupted",
                 "error": "Execution interrupted",
@@ -91,6 +147,7 @@ def register(cat: ToolCatalogue) -> None:
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
+            _render_snapshot(buf_out.getvalue(), buf_err.getvalue())
             return {
                 "kind": "error",
                 "error": f"{type(exc).__name__}: {exc}",
@@ -107,6 +164,7 @@ def register(cat: ToolCatalogue) -> None:
             stderr_bytes=len(buf_err.getvalue()),
             new_bindings=new_bindings,
         )
+        _render_snapshot(buf_out.getvalue(), buf_err.getvalue())
         return {
             "kind": "success",
             "stdout": buf_out.getvalue(),
@@ -142,4 +200,5 @@ def register(cat: ToolCatalogue) -> None:
             "required": ["code"],
         },
         callable_=python_exec,
+        tags=["scripting", "python"],
     )

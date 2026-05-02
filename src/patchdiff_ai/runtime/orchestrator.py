@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from langgraph.types import Command
@@ -11,10 +11,12 @@ from langgraph.types import Command
 from patchdiff_ai.graphs.interrupts import RefinementPickRequest, RefinementRequest
 from patchdiff_ai.observability.metrics import bind_cost_tracker
 from patchdiff_ai.observability.trace import bind_cve
-from patchdiff_ai.platforms import select_platform
 from patchdiff_ai.runtime.app_context import AppContext
 from patchdiff_ai.runtime.interactive import CliInteractor
 from patchdiff_ai.runtime.timer import bind_phase_tracker
+
+if TYPE_CHECKING:
+    from patchdiff_ai.platforms.base import Platform
 
 log = structlog.get_logger(__name__)
 
@@ -23,22 +25,22 @@ async def run_cve(
     ctx: AppContext,
     cve: str,
     *,
+    platform: "Platform",
     interactive: bool = False,
     evaluate: bool = False,
     force: bool = False,
-    platform: tuple[str, int] | None = None,
-    platform_name: str | None = None,
     interactor: CliInteractor | None = None,
 ) -> dict[str, Any]:
     """Run the pipeline graph for a single CVE end-to-end.
 
+    `platform` is the resolved concrete `Platform` (from the CLI's
+    NVD auto-detect or `--platform <name>` / `<provider> cve --platform-id`
+    overrides). The orchestrator does not look up a platform — that
+    responsibility moved up to the CLI in M1.
+
     `force=True` bypasses the CVE_INFO cached-report short-circuit so
     a reanalyze actually re-runs (orthogonal to `evaluate`, which fans
     the analysis across every eval model).
-
-    `platform_name` overrides the platform plugin auto-detection.
-    `platform` is the Windows-only MSRC `(name, productId)` hint from
-    `--platform-ids`; ignored by other plugins.
     """
     from patchdiff_ai.graphs.pipeline.graph import build_pipeline_graph
     from patchdiff_ai.graphs.pipeline.state import PipelineState
@@ -73,24 +75,10 @@ async def run_cve(
             interactive=interactive,
             evaluate=evaluate,
             force=force,
-            platform_override=platform_name,
-            platform_ids_hint=platform,
+            platform=platform.name,
         )
-        # Resolved once per run, before the graph builds; nodes read
-        # `ctx.platform`. The MSRC hint stays separate because it's
-        # Windows-internal.
-        ctx.platform = select_platform(cve, override=platform_name)
-        ctx.platform_ids_hint = platform
-        log.info(
-            "platform_selected",
-            name=ctx.platform.name,
-            mode="override" if platform_name else "auto",
-        )
-        log.trace(
-            "platform_selection_resolved",
-            name=ctx.platform.name,
-            was_override=platform_name is not None,
-        )
+        ctx.platform = platform
+        log.info("platform_selected", name=platform.name)
         # Checkpointer only when an interrupt() can fire. The gather_info
         # node parks live polars DataFrames in state and the JSON serdes
         # choke on them — skipping the checkpointer avoids that.

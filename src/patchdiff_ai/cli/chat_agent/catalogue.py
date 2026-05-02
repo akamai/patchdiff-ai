@@ -51,10 +51,18 @@ class ToolCatalogue:
         input_schema: dict[str, Any],
         callable_: Callable[..., Any] | Callable[..., Awaitable[Any]],
         *,
+        tags: list[str] | None = None,
         passthrough: bool = False,
         display: Callable[[Any], str] | None = None,
     ) -> None:
         """Register an in-process tool.
+
+        `tags` is the multi-valued taxonomy exposed via the `list_tools`
+        meta-tool (e.g. ["scripting", "python"], ["reverse engineering",
+        "binary"], ["data", "sql"]). A tool can carry multiple tags and
+        will surface under each. Distinct from `tier` (which marks
+        in-process vs ida-worker dispatch). Untagged tools land under
+        the implicit "general" tag at display time.
 
         `passthrough=True` prints the rendered body to the terminal and
         hands the LLM only a summary — used for "show me X" tools so the
@@ -67,6 +75,7 @@ class ToolCatalogue:
             "description": description,
             "input_schema": input_schema,
             "tier": "native",
+            "tags": list(tags) if tags else [],
             "_call": callable_,
             "passthrough": passthrough,
             "display": display,
@@ -76,7 +85,18 @@ class ToolCatalogue:
         self,
         entries: list[dict[str, Any]],
         dispatcher: Callable[[str, dict[str, Any]], Awaitable[str]],
+        *,
+        tags: list[str] | None = None,
     ) -> None:
+        """Bulk-register ida-pro-mcp tools through `dispatcher`.
+
+        All entries get the same `tags`. Default is
+        ["reverse engineering", "binary"] since IDA tools are binary-
+        analysis primitives that compose with BinDiff under the same
+        umbrella.
+        """
+        if tags is None:
+            tags = ["reverse engineering", "binary"]
         for entry in entries:
             name = entry["name"]
             if name in _DENY_IDA_TOOLS:
@@ -86,16 +106,48 @@ class ToolCatalogue:
                 "description": entry.get("description", ""),
                 "input_schema": entry.get("input_schema", {"type": "object"}),
                 "tier": "ida",
+                "tags": list(tags),
                 "_call": dispatcher,
             }
 
-    def list(self, name_filter: str = "") -> list[dict[str, Any]]:
+    def list(
+        self, name_filter: str = "", tag: str = ""
+    ) -> list[dict[str, Any]]:
+        """Return tool entries, optionally filtered by name substring + tag.
+
+        `tag` matches when the entry's tag list contains it (case-
+        insensitive). Output is the lightweight
+        `{name, tags, description}` shape — no `tier`, no input schema.
+        Use `describe()` for the full record.
+        """
         f = name_filter.lower().strip()
+        t = tag.lower().strip()
         return [
-            {"name": e["name"], "description": e["description"], "tier": e["tier"]}
+            {
+                "name": e["name"],
+                "tags": e["tags"],
+                "description": e["description"],
+            }
             for e in self._entries.values()
-            if not f or f in e["name"].lower() or f in e["description"].lower()
+            if (not t or t in (x.lower() for x in e["tags"]))
+            and (not f or f in e["name"].lower() or f in e["description"].lower())
         ]
+
+    def list_tags(self) -> dict[str, list[str]]:
+        """Return `{tag: [tool_name, ...]}` for the tag-overview view.
+
+        Tools tagged with multiple tags appear under each — that's the
+        whole point of tags vs single category. Untagged tools land
+        under the implicit "general" tag.
+        """
+        out: dict[str, list[str]] = {}
+        for e in self._entries.values():
+            tags = e["tags"] or ["general"]
+            for t in tags:
+                out.setdefault(t, []).append(e["name"])
+        for names in out.values():
+            names.sort()
+        return out
 
     def describe(self, name: str) -> dict[str, Any] | None:
         e = self._entries.get(name)
@@ -106,6 +158,7 @@ class ToolCatalogue:
             "description": e["description"],
             "input_schema": e["input_schema"],
             "tier": e["tier"],
+            "tags": e["tags"],
         }
 
     def get_result(self, result_id: str) -> str | None:

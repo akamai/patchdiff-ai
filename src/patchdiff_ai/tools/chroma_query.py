@@ -5,10 +5,11 @@ covers all access paths (exact ids, semantic, metadata filter), plus
 `info()` for static-schema-plus-live-count discovery.
 
 Schemas are hardcoded next to the collection names, sourced from the
-two write sites:
-  - reports   → graphs/vulnerability_research/nodes.py:279
-  - file_info → graphs/gather_info/nodes.py:247
-  - func_logic has no writer yet (reserved).
+three write sites:
+  - reports     → graphs/vulnerability_research/nodes.py (in `generate`)
+  - file_info   → graphs/gather_info/nodes.py:247
+  - func_logic  → graphs/vulnerability_research/nodes.py
+                  (in `_persist_func_logic`, called from `indexing`)
 """
 
 from __future__ import annotations
@@ -57,9 +58,24 @@ class ChromaQueryService:
         },
         "func_logic": {
             "attr": "func_logic",
-            "description": "Reserved for per-function logic embeddings; currently unpopulated.",
-            "metadata_fields": [],
-            "schema_source": "(no writer registered)",
+            "description": (
+                "One row per (CVE × file × function × patch wave) — embeds "
+                "the unified diff between pre/post-patch decompilation. Use "
+                "for semantic search across past patches: 'find functions "
+                "whose patch shape resembles X'."
+            ),
+            "metadata_fields": [
+                ("cve", "str", "e.g. 'CVE-2024-12345'"),
+                ("file", "str", "Source binary, e.g. 'shell32.dll'"),
+                ("address", "str", "Hex function address (post-patch), e.g. '1801A3F80'"),
+                ("name", "str", "Function name (post-patch)"),
+                ("kb", "str", "Current Microsoft KB"),
+                ("previous_kb", "str", "Previous Microsoft KB (the version that was patched)"),
+                ("patch_store_uid", "str", "Stable patch_store row id; joins with reports"),
+                ("similarity", "float", "BinDiff similarity 0.0-1.0"),
+                ("confidence", "float", "BinDiff confidence 0.0-1.0"),
+            ],
+            "schema_source": "graphs/vulnerability_research/nodes.py:_persist_func_logic",
         },
     }
 

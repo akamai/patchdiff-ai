@@ -54,6 +54,7 @@ def register(cat: ToolCatalogue, ctx: AppContext) -> None:
         "count, and column schema (name + dtype).",
         {"type": "object", "properties": {}, "required": []},
         list_dataframes,
+        tags=["data", "schema"],
     )
 
     def query_dataframe(
@@ -99,6 +100,7 @@ def register(cat: ToolCatalogue, ctx: AppContext) -> None:
         "list of row dicts.",
         _QUERY_SCHEMA,
         query_dataframe,
+        tags=["data", "sql"],
     )
 
     cat.register_native(
@@ -113,6 +115,7 @@ def register(cat: ToolCatalogue, ctx: AppContext) -> None:
         "you to read or reason over the data, use `query_dataframe`.",
         _QUERY_SCHEMA,
         query_dataframe,
+        tags=["data", "sql", "display"],
         passthrough=True,
         display=_render_query_dataframe,
     )

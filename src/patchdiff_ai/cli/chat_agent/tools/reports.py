@@ -37,6 +37,7 @@ def register(cat: ToolCatalogue, ctx: AppContext, cve: str, chroma: ChromaQueryS
             "required": [],
         },
         _read_report,
+        tags=["report", "analysis"],
     )
 
     def _search_reports(query: str) -> dict[str, Any]:
@@ -55,6 +56,7 @@ def register(cat: ToolCatalogue, ctx: AppContext, cve: str, chroma: ChromaQueryS
             "required": ["query"],
         },
         _search_reports,
+        tags=["report", "analysis", "search"],
     )
 
     def _load_report_for_display(model_name: str = "") -> str:
@@ -88,5 +90,6 @@ def register(cat: ToolCatalogue, ctx: AppContext, cve: str, chroma: ChromaQueryS
             "required": [],
         },
         _load_report_for_display,
+        tags=["report", "analysis", "display"],
         passthrough=True,
     )

@@ -175,26 +175,51 @@ layers don't import from higher ones.
 
 ### 1. CLI ([`src/patchdiff_ai/cli/`](../src/patchdiff_ai/cli/))
 
-The CLI is built on **typer**. [`cli/app.py`](../src/patchdiff_ai/cli/app.py) defines
-the root and registers four subcommands:
+The CLI uses **Click** for the plugin-aware surface and keeps **typer** for
+the legacy `cached` command (mounted via `typer.main.get_command(...)`).
+[`cli/root.py`](../src/patchdiff_ai/cli/root.py) defines the Click root
+and mounts a thin generic core plus one self-registered sub-group per
+platform provider.
 
-| Command        | Purpose                                                        |
-|----------------|----------------------------------------------------------------|
-| `health-check` | Validate `.env` + tool paths + provider availability           |
-| `cve`          | Run end-to-end on a single CVE                                 |
-| `month`        | Run end-to-end on every CVE in a Patch Tuesday                 |
-| `cached`       | Save Chroma-cached reports to `reports/` (no graph run)        |
+```
+patchdiff-ai [-L LOG_LEVEL]
+├── cve <CVE-ID> [--platform N] [--eval] [--interrupt] [--chat] [--chat-permissive]
+│       # auto-detects via parallel native (MSRC/USN/...) → NVD fallback
+├── health-check          # core checks + every provider's health_check()
+├── install               # core IDA assets + every provider's install()
+├── cached                # legacy typer command (mounted via typer→click bridge)
+├── windows               # registered by WindowsProvider
+│   ├── cve <CVE-ID> [--platform-id N] [--eval] [--interrupt] [--chat] [--chat-permissive]
+│   ├── health-check
+│   ├── install
+│   └── month <YYYY-MMM> [--platform-id N] [--platform-name X]
+└── linux                 # registered by LinuxProvider (skeleton)
+    ├── cve <CVE-ID> [--distro X] [--release Y]
+    ├── health-check
+    └── install
+```
 
 Conventions:
 
-- The root `--log-level` callback runs first and configures structlog before any
-  subcommand body.
-- `_bootstrap()` runs **before** LangGraph is imported and force-disables
-  LangSmith / LangChain tracing (`LANGCHAIN_TRACING_V2=false`,
-  `LANGSMITH_TRACING=false`) plus strips any inherited API key / endpoint.
-  LangChain captures `LANGCHAIN_*` at import time, so this has to happen first.
-- Argument validators (`cve_value`, `month_value`, `platform_ids`) are typer
-  parameter callbacks in [`cli/validators.py`](../src/patchdiff_ai/cli/validators.py).
+- [`cli/app.py`](../src/patchdiff_ai/cli/app.py)'s `main()` is a thin adapter:
+  it runs `_bootstrap()` (env-strip + tracing-disable BEFORE LangGraph imports)
+  and then dispatches to the Click root in [`cli/root.py`](../src/patchdiff_ai/cli/root.py).
+- The root group's `-L/--log-level` callback runs first and configures structlog
+  before any subcommand body.
+- `_bootstrap()` force-disables LangSmith / LangChain tracing
+  (`LANGCHAIN_TRACING_V2=false`, `LANGSMITH_TRACING=false`) plus strips any
+  inherited API key / endpoint. LangChain captures `LANGCHAIN_*` at import time,
+  so this has to happen first.
+- Shared CVE-running flags (`--eval / --interrupt / --chat / --chat-permissive`)
+  are factored into a `@cve_options` decorator in
+  [`cli/options.py`](../src/patchdiff_ai/cli/options.py); every `cve`-style
+  command uses it so help stays consistent.
+- All three `cve` entry points (root `cve`, `windows cve`, `linux cve`) delegate
+  to a single dispatcher in [`cli/runner.py`](../src/patchdiff_ai/cli/runner.py)
+  (`run_single_cve`). The CLI never builds an `AppContext` directly.
+- `cli/validators.py` is now down to just `cve_value`. The `YYYY-MMM` regex
+  (`MONTH_RE`) and CSV parsing for `--platform-id` moved into the windows
+  plugin.
 - `KeyboardInterrupt` / `EOFError` exit with code 130 (the standard "Ctrl-C" code).
 
 ### 2. Configuration ([`src/patchdiff_ai/config/`](../src/patchdiff_ai/config/))
@@ -409,8 +434,8 @@ routing.
   - `from_vr` — straight to FINALIZE.
   - `from_finalize` — straight to END.
 - **Nodes** (`nodes.py`):
-  - `cve_info_node` — selects a `Platform` plugin (override via `--platform`,
-    else auto-detect via `matches()`), delegates the advisory fetch + KB
+  - `cve_info_node` — reads `ctx.platform` (resolved at the CLI layer
+    before `run_cve` was invoked), delegates the advisory fetch + KB
     selection to `ctx.platform.enrich_cve(state, ctx)`, then checks the
     Chroma reports cache and optionally short-circuits to FINALIZE.
   - `gather_node` — thin wrapper around `ctx.platform.gather_packages(state, ctx)`.
@@ -608,44 +633,64 @@ Inline f-strings for CVE metadata are replaced with a JSON-formatted
 
 ### 13. Platforms ([`src/patchdiff_ai/platforms/`](../src/patchdiff_ai/platforms/))
 
-The pipeline is platform-shaped, not Windows-shaped. Everything that varies
-per OS / distro / vendor lives behind a `Platform` protocol so adding a
-second target (Debian via apt, Android via AOSP bulletin, …) is "implement
-four methods + register one entry."
+The pipeline is platform-shaped, not Windows-shaped. Two protocols at
+[`platforms/base.py`](../src/patchdiff_ai/platforms/base.py):
+
+- **`PlatformProvider`** — group-level (one per `windows`, `linux`, ...).
+  Owns the Click sub-group, runs auto-detect, aggregates `health_check`
+  / `install`, resolves CLI overrides to a concrete `Platform`.
+- **`Platform`** — per-version (one per Windows release, one per
+  distro/release pair, ...). Owns the pipeline-facing methods:
+  `enrich_cve`, `gather_packages`, `candidate_prompts`,
+  `candidate_metadata`.
 
 | Module                                                                              | Responsibility                                                                                          |
 |-------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
-| [`base.py`](../src/patchdiff_ai/platforms/base.py)                                  | `Platform` Protocol + `UnknownPlatform` / `UnsupportedPlatform` exceptions.                             |
-| [`windows.py`](../src/patchdiff_ai/platforms/windows.py)                            | `WindowsPlatform` — wires existing MSRC + OS detection + the gather subgraph + the platform-internals prompt IDs. |
-| [`__init__.py`](../src/patchdiff_ai/platforms/__init__.py)                          | `PLATFORMS = [WindowsPlatform()]` registry + `select_platform(cve_id, override=None)`.                  |
+| [`base.py`](../src/patchdiff_ai/platforms/base.py)                                  | `Platform` + `PlatformProvider` Protocols + `UnknownPlatform` / `UnsupportedPlatform` exceptions.       |
+| [`__init__.py`](../src/patchdiff_ai/platforms/__init__.py)                          | `providers()` registry + `resolve_for_cve(cve_id, platform_override=None)` (parallel native → NVD fallback). |
+| [`nvd.py`](../src/patchdiff_ai/platforms/nvd.py)                                    | NVD CPE lookup helper, on-disk cached at `<db_dir>/.nvd/<cve>.json` (30-day TTL). Used as the fallback in `resolve_for_cve`. |
+| [`windows/`](../src/patchdiff_ai/platforms/windows/)                                | `WindowsProvider` (real impl). Owns N `WindowsVersionedPlatform` instances loaded from `platforms.json`. `matches_native` hits MSRC; `matches_nvd` matches Windows CPE prefixes. |
+| [`linux/`](../src/patchdiff_ai/platforms/linux/)                                    | `LinuxProvider` (skeleton). Pre-declares ubuntu/debian distros so the CLI tree shows up; pipeline-facing methods raise `NotImplementedError` until wired. |
+| [`add_platform.md`](../src/patchdiff_ai/platforms/add_platform.md)                  | Step-by-step instructions for adding a new provider. Read this when you start.                          |
 
-The protocol surface is intentionally small:
+Protocol surfaces:
 
 ```python
 class Platform(Protocol):
     name: str
-    def matches(self, cve_id: str) -> bool: ...
     async def enrich_cve(self, state, ctx) -> dict[str, Any]: ...
     async def gather_packages(self, state, ctx) -> dict[str, Any]: ...
     def candidate_prompts(self) -> tuple[PromptId, PromptId]: ...
     def candidate_metadata(self, cve) -> dict[str, Any]: ...
+
+class PlatformProvider(Protocol):
+    name: str
+    def cli_group(self) -> click.Group: ...
+    def health_check(self) -> bool: ...
+    def install(self) -> None: ...
+    async def matches_native(self, cve_id: str) -> Platform | None: ...
+    def matches_nvd(self, cpes: list[str]) -> Platform | None: ...
+    def resolve(self, **overrides: Any) -> Platform: ...
 ```
 
-Selection happens once per CVE inside `run_cve` (see
-[`runtime/orchestrator.py`](../src/patchdiff_ai/runtime/orchestrator.py)):
-`--platform <name>` is an explicit override; otherwise the first plugin whose
-`matches()` returns True wins. The chosen instance is stashed on
-`ctx.platform` for the duration of the run and read by every downstream node
-that calls `enrich_cve`, `gather_packages`, `candidate_prompts`, or
-`candidate_metadata`. The legacy `--platform-ids` MSRC product hint flows
-separately on `ctx.platform_ids_hint` (Windows-internal, ignored by other
-plugins).
+**CVE → platform resolution** ([`platforms/__init__.py:resolve_for_cve`](../src/patchdiff_ai/platforms/__init__.py)):
 
-`matches()` is fast and offline — string heuristics on the CVE ID, no network
-probes. Network probing is `enrich_cve`'s job, where failure is a normal error
-path. Today Windows is the catch-all default (`cve_id.upper().startswith("CVE-")`);
-when M2 lands a real second platform, the heuristics tighten and Windows moves
-to last in the registry.
+1. **`--platform <name>` override** → look up that provider, ask it to
+   pick the right version (native first, then NVD, then provider's
+   default).
+2. **No override → parallel native round.** Every provider's
+   `matches_native(cve_id)` runs concurrently via `asyncio.gather`.
+   First non-`None` wins; ties pick by registration order (warning
+   logged).
+3. **All native missed → NVD fallback.** Hit NVD's CPE list once, ask
+   each provider's `matches_nvd(cpes)` in registration order.
+4. **Both rounds missed → `UnsupportedPlatform`** with a hint pointing
+   at `--platform <name>`.
+
+The CLI does the resolution before invoking the orchestrator. The
+chosen `Platform` is stashed on `ctx.platform` at `run_cve` entry, and
+every downstream node reads from there. There is no `select_platform`
+inside the runtime any more, and no `platform_ids_hint` side channel.
 
 ---
 
@@ -936,25 +981,40 @@ short-circuits at step 3, returning immediately.
 
 ### Add a new platform (distro / vendor / OS)
 
-1. Implement the `Platform` protocol in `platforms/<name>.py`. The five
-   methods (`matches`, `enrich_cve`, `gather_packages`, `candidate_prompts`,
-   `candidate_metadata`) carry the entire OS-specific surface — everything
-   else in the pipeline reads `ctx.platform`.
-2. Register an instance in
-   [`platforms/__init__.py`](../src/patchdiff_ai/platforms/__init__.py)'s
-   `PLATFORMS` list. Order matters for auto-detect: more specific
-   `matches()` heuristics first, catch-alls last.
-3. If your platform needs new advisory fields, add them to
-   [`schemas/cve.py`](../src/patchdiff_ai/schemas/cve.py) as optional fields
-   so the existing Windows path keeps working unchanged.
-4. If your platform's candidate prompts need different shape, add new
-   `PromptId` entries in [`prompts/registry.py`](../src/patchdiff_ai/prompts/registry.py)
-   and have your `candidate_prompts()` return them.
+The full step-by-step lives at
+[`src/patchdiff_ai/platforms/add_platform.md`](../src/patchdiff_ai/platforms/add_platform.md).
+Short version:
 
-[`platforms/windows.py`](../src/patchdiff_ai/platforms/windows.py) is the
-reference: each method delegates to existing `patches/*` modules and the
-Windows gather subgraph. No logic was rewritten when the seam was
-introduced — adding a new platform should look the same way.
+1. Create a package `platforms/<name>/` with `provider.py`,
+   `<thing>.py` (the per-version `Platform`), `cli.py`, and
+   `__init__.py`. Use [`platforms/linux/`](../src/patchdiff_ai/platforms/linux/)
+   as the template — it's the canonical skeleton.
+2. Implement the `Platform` protocol's four pipeline-facing methods on
+   the per-version class: `enrich_cve`, `gather_packages`,
+   `candidate_prompts`, `candidate_metadata`.
+3. Implement the `PlatformProvider` protocol on the group-level class:
+   `cli_group`, `health_check`, `install`, `matches_native`,
+   `matches_nvd`, `resolve`. Wrap any sync HTTP calls inside
+   `matches_native` with `asyncio.to_thread` so the parallel native
+   round stays parallel.
+4. Build the Click sub-group with `cve` (using `@cve_options` from
+   [`cli/options.py`](../src/patchdiff_ai/cli/options.py) and delegating
+   to [`cli/runner.run_single_cve`](../src/patchdiff_ai/cli/runner.py)),
+   `health-check`, `install`. Add provider-specific commands as needed.
+5. Register `MyProvider()` in
+   [`platforms/__init__.py`](../src/patchdiff_ai/platforms/__init__.py)'s
+   `providers()` tuple.
+6. If your platform needs new advisory fields, add them to
+   [`schemas/cve.py`](../src/patchdiff_ai/schemas/cve.py) as optional
+   fields so the existing Windows path keeps working unchanged.
+7. If your platform's candidate prompts need a different shape, add new
+   `PromptId` entries in
+   [`prompts/registry.py`](../src/patchdiff_ai/prompts/registry.py) and
+   return them from `candidate_prompts()`.
+
+[`platforms/windows/`](../src/patchdiff_ai/platforms/windows/) is the
+real reference (provider + versioned plugin + Click group + cycle
+helpers).
 
 ### Add an analysis stage to an existing subgraph
 

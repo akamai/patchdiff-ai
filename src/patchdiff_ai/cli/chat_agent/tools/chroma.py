@@ -95,6 +95,7 @@ def register(cat: ToolCatalogue, chroma: ChromaQueryService) -> None:
         "`where` clause if you're not sure which fields exist.",
         {"type": "object", "properties": {}, "required": []},
         list_collections,
+        tags=["search", "vector-store", "schema"],
     )
 
     def chroma_query(
@@ -132,4 +133,5 @@ def register(cat: ToolCatalogue, chroma: ChromaQueryService) -> None:
         "the bare {cve: <current>} / pure-semantic cases.",
         _CHROMA_QUERY_SCHEMA,
         chroma_query,
+        tags=["search", "vector-store"],
     )
