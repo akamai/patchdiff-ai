@@ -1,359 +1,568 @@
 # PatchDiff-AI
 
-**LangGraph‑powered multi‑agent system that turns batches of CVE IDs into fully‑fledged root‑cause reports.**
-> [!TIP]
-> Read more about it [here](https://www.akamai.com/blog/security-research/patch-wednesday-root-cause-analysis-with-llms)
+> LangGraph-driven multi-agent system that turns a Microsoft CVE ID into a fully-fledged
+> root-cause-analysis report — by downloading the relevant Windows Update, diffing the
+> patched and unpatched binaries with IDA Pro + BinDiff, decompiling what changed, and
+> letting an LLM ensemble explain *why* the change is a security fix.
+
+Feed it `CVE-2025-29824`. Get back a markdown report that names the buggy function,
+shows the pre/post-patch decompilation diff, and walks the trigger flow.
+
 ---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Prerequisites](#prerequisites)
-4. [Installation](#installation)
-   * [4.1 Python 3.11](#41-python-311)
-   * [4.2 IDA Pro 8.x](#42-ida-pro-8x)
-   * [4.3 BinExport + BinDiff 8](#43-binexport--bindiff-8)
-   * [4.4 Project dependencies](#44-project-dependencies)
-5. [Quick Start](#quick-start)
-6. [Sample Output](#sample-output)
-7. [Extending the Graph](#extending-the-graph)
-8. [Contributing](#contributing)
-9. [License](#license)
+1. [Status](#status)
+2. [What it does](#what-it-does)
+3. [High-level architecture](#high-level-architecture)
+4. [Prerequisites](#prerequisites)
+5. [Installation](#installation)
+6. [Configuration](#configuration)
+7. [Usage](#usage)
+8. [Output](#output)
+9. [Logging & observability](#logging--observability)
+10. [Extending](#extending)
+11. [Project layout](#project-layout)
+12. [License](#license)
 
 ---
 
-## Overview
+## Status
 
-`PatchDiff-AI` is a Python-based, LangGraph-driven **multi-agent** system that **automates large-scale reverse-engineering**. Feed it a plain-text list of CVE identifiers, and it **spawns** a supervised multi-agent graph that decompiles the vulnerable component, correlates patched **and** unpatched binaries with BinDiff 8, and **generates** a detailed report for each vulnerability.
+The greenfield rewrite is the active codebase.
 
-* **Parallel by default** – every CVE runs in its own instance of the graph.  
-* **Deterministic supervision** – the top-level *Supervisor* node coordinates tool errors and time-outs so rogue sub-agents cannot derail the batch.  
-* **Extensible** – new analysis stages are a single node away (see [Extending the Graph](#extending-the-graph)).
+- The active package is [src/patchdiff_ai/](src/patchdiff_ai/) — Pydantic v2 +
+  dependency-injected `AppContext` + structured observability + a `Platform`
+  plugin protocol so non-Windows targets can be added without touching the
+  pipeline graph.
+- The original implementation lives at [patchdiff-ai-wip-models_config/](patchdiff-ai-wip-models_config/)
+  (gitignored, kept only as a parity reference).
+- Architecture details are in [docs/Architecture.md](docs/Architecture.md);
+  the original M1→M6 plan that drove the rewrite is at
+  [.plan/refactor-plan.md](.plan/refactor-plan.md).
 
-> [!NOTE]
-> **Supported OS: Windows only.** The system targets Microsoft Patch Tuesday updates, but contributors are welcome to extend it to other platforms (e.g., Android) or specific applications. It currently analyzes only CVEs that affect the host OS version.<br>
-> **Tested on: Windows 11 24H2 x64**; other versions *should* work.
-
-> [!WARNING]  
-> This project uses `chromadb`, which **has** a known crashing issue on some setups. If you **encounter** *Process finished with exit code -1073741819 (0xC0000005)*, the fault lies in `chromadb`/`HNSWlib`. Switch the virtual-machine engine or use a physical machine.
+The user-visible workflow (`patchdiff-ai cve <id>` produces an RCA report) and
+the on-disk layout (`db/`, `reports/`, `_temp/`, `logs/`) match the legacy
+implementation.
 
 ---
 
-## Architecture
+## What it does
 
-![Supervisor.png](rsrc/arch.png)
+Given a single CVE identifier (e.g. `CVE-2025-29824`) or a whole Patch Tuesday cycle
+(e.g. `2025-Apr`), PatchDiff-AI:
 
-Each **Agent** is a subgraph and operates independently. Anyone can extend the system easily by containing the changes to the relevant graph.
+1. **Resolves the CVE** against MSRC's CVRF feed, picks the right Windows OS / KB pair
+   (current vs. superseded), and decides whether the host platform is even affected.
+2. **Downloads** the relevant `.msu` packages from the Microsoft Update Catalog.
+3. **Extracts** them — handling nested `.cab` / `.psf` archives and applying forward /
+   reverse delta patches via `UpdateCompression.dll`.
+4. **Builds an executable index** of every binary that meaningfully differs between the
+   two updates, embedding short LLM-written descriptions into a Chroma collection.
+5. **Picks candidates** — a platform-internals agent uses CVE metadata + vector search
+   to rank the top suspects (similarity × LLM relevancy score).
+6. **Reverse engineers** each candidate pair: IDA Pro + BinExport produce comparable
+   exports, BinDiff diffs them, and changed functions are decompiled.
+7. **Generates the report** — a vulnerability-research agent scores each changed
+   function for security impact, picks the top changes, and asks an LLM (or several,
+   in `--eval` mode) to write a root-cause analysis.
+8. **Persists the report** in the Chroma `reports` collection and prints / saves it
+   under `reports/`.
+
+Each CVE runs in its own LangGraph instance. Fan-out (CVE → multiple candidate binaries
+→ multiple RE/VR agents) uses LangGraph's `Send` primitive. The pipeline graph
+sequences stages via an explicit `Stage` enum — it's a deterministic state machine,
+not an LLM-driven supervisor.
+
+> **Supported targets**: Microsoft Patch Tuesday updates on Windows. Tested on
+> Windows 11 24H2 x64. Other Windows versions should work; non-Windows targets are
+> not currently supported.
+
+---
+
+## High-level architecture
+
+```
+   patchdiff-ai cve CVE-YYYY-NNNNN
+              │
+              ▼
+   ┌──────────────────────┐
+   │         CLI          │   typer + .env loader; builds AppContext
+   └──────────┬───────────┘
+              │ AppContext (DI bundle)
+              ▼
+   ┌──────────────────────┐
+   │     Orchestrator     │   selects Platform plugin, runs the
+   │     run_cve(...)     │   pipeline, resumes on interrupt()
+   └──────────┬───────────┘
+              ▼
+   ╔══════════════════════════════════════════════════════════════════════╗
+   ║      Pipeline graph (LangGraph state machine — deterministic)        ║
+   ║                                                                      ║
+   ║   CVE_INFO ─► GATHER ─► PI_AGENT ─► RE_AGENT ─► VR_AGENT ─► FINALIZE ║
+   ║   (advisory  (download  (rank        (per-cand    (per-art    ─► END ║
+   ║    + cache    + extract  candidates   IDA +        scoring +         ║
+   ║    short-     packages   via vector   BinDiff +    structured        ║
+   ║    circuit)   per        search +     decomp)      report)           ║
+   ║               platform)  refine)                                     ║
+   ║                                                                      ║
+   ║                          ═══►          ═══►                          ║
+   ║                          Send fan-out  Send fan-out                  ║
+   ║                          (per cand.)   (per artifact)                ║
+   ║                                                                      ║
+   ║   Cache hit on CVE_INFO, or empty fan-outs at PI / RE,               ║
+   ║   short-circuit straight to FINALIZE.                                ║
+   ╚══════════════════════════════════════════════════════════════════════╝
+              │                                            │
+              │ enrich_cve / gather_packages /             │ AppContext
+              │ candidate_prompts / candidate_metadata     │ read by every
+              ▼                                            ▼ node
+   ┌──────────────────────┐                ┌──────────────────────────┐
+   │  Platform plugin     │                │ Tools · LLM Registry     │
+   │  windows / debian /  │                │ Vector stores · Logging  │
+   │  android / ...       │                │ Prompts · Progress       │
+   └──────────────────────┘                └──────────────────────────┘
+   (consulted by CVE_INFO,
+    GATHER, PI_AGENT)
+```
+
+For the full breakdown, see [docs/Architecture.md](docs/Architecture.md).
 
 ---
 
 ## Prerequisites
 
-| Tool          | Version         | Why                                     |
-|---------------|-----------------|-----------------------------------------|
-| **Python**    | 3.11 x64        | Developed and tested using this version |
-| **IDA Pro**   | ≥ 8.0 and < 9.0 | Required by BinDiff 8                   |
-| **BinDiff**   | 8.0             | Binary diffing engine                   |
-| **BinExport** | ≥ 12            | IDA plugin that produces .BinDiff files |
-| **7-zip**     | ≥ 22            | Used to extract the update archives     |
+| Tool          | Version            | Why                                       |
+|---------------|--------------------|-------------------------------------------|
+| **Python**    | 3.11 x64           | Required (the project pins `>=3.11`)      |
+| **IDA Pro**   | 8.x (≥ 8.0, < 9.0) | Required by BinDiff 8                     |
+| **BinDiff**   | 8.0                | Binary diffing engine                     |
+| **BinExport** | ≥ 12               | IDA plugin that produces `.BinExport`     |
+| **7-Zip**     | ≥ 22               | Used to extract update archives           |
 
-> [!IMPORTANT]
-> **Licensing:** IDA Pro is commercial. Buy a legal copy or fork this repo and extend it to Ghidra.
+> **Licensing**: IDA Pro is commercial. Either bring a legal license or fork the
+> project to use Ghidra (PRs welcome).
 
-> [!TIP]
-> This tool use Azure OpenAI models using environment variables `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_CLIENT_SECRET`.
-> Alternatively, use `DefaultAzureCredential` using Azure CLI `az login`. 
-> Or extend the project to use other models like `Claude`, `Gemini`, etc... (`LLM` class)
+LLM access: Azure OpenAI is the primary provider. Anthropic and Gemini are supported
+as eval / fallback providers. See [Configuration](#configuration).
+
 ---
 
 ## Installation
 
-### 4.1 Python 3.11
-
-Download *Windows x64* installer from [https://www.python.org/downloads/release/python-3119/](https://www.python.org/downloads/release/python-3119/). During setup **enable “Add to PATH”** and **“Install for all users”**.
-
 ```powershell
-python --version  # should print 3.11.x
+git clone <this repo>
+cd patchdiff-ai
+
+# Create and activate a virtual env
+python -m venv .venv
+.venv\Scripts\activate
+
+# Install the package (editable) and its dependencies
+pip install -e .
 ```
 
-### 4.2 IDA Pro 8.x
-
-1. Purchase / download IDA Pro 8.x from Hex‑Rays.
-2. Run the installer.
-3. Keep the default location (e.g. `C:\Program Files\IDA Pro 8.0`).
-4. Check if the IDA has access to python by running commands in the GUI shell.
-   If not, run `idapyswitch` as admin.
+The package exposes a console entry point:
 
 ```powershell
-"%IDA_PATH%\idapyswitch.exe"
+patchdiff-ai --help
+# or, equivalently:
+python -m patchdiff_ai --help
 ```
 
-### 4.3 BinExport + BinDiff 8
-
-1. Download BinDiff 8 from Google Security Research.
-2. Validate the following DLLs in the IDA *plugins* folder:
-   * `%appdata%\Hex-Rays\IDA Pro\plugins`
-     * `bindiff8_ida*.dll`
-     * `binexport12_ida*.dll`
-3. Restart IDA once to verify `Edit → Plugins → BinExport` is present.
-
-### 4.4 Project dependencies
+Verify external tools and credentials end-to-end:
 
 ```powershell
-# clone
-> git clone <this repo>
-> cd patchdiff_ai
-
-# isolate
-> python -m venv .venv
-> .venv\Scripts\activate
-
-# compile deps (langgraph, python-bindiff, etc.)
-> pip install -r requirements.txt
+patchdiff-ai health-check
 ```
+
+`health-check` validates `.env`, prints the resolved model catalog, and smoke-tests the
+external tool wrappers.
 
 ---
 
-## Quick Start
-After installation, the fastest way to start your first analysis is to get CVE that affect your system from [MSRC](https://msrc.microsoft.com/update-guide/)
-```powershell
-> cd patchdiff_ai/
-> python.exe .\patchdiff_ai.py cve CVE-2025-29824
+## Configuration
+
+Everything is read from `.env` (or process env vars) via `pydantic-settings`. Nested
+fields use `__` as the delimiter — e.g. `PATHS__DB_DIR=/data/patchdiff/db`.
+
+**Azure OpenAI** (primary):
+
+```env
+AZURE_ENDPOINT=https://<resource>.openai.azure.com
+AZURE_TENANT_ID=...
+AZURE_CLIENT_ID=...
+AZURE_CLIENT_SECRET=...
 ```
-![single_analysis.gif](rsrc/single_analysis.gif)
 
-You can also get a list of the CVEs that affect a certain system and even analyze all of them in parallel:
-```powershell
-> python.exe .\patchdiff_ai.py month 2025-May
+If the service-principal trio is absent, the registry falls back to
+`DefaultAzureCredential` (e.g. `az login`).
+
+**Anthropic** (eval / fallback):
+
+```env
+ANTHROPIC_API_KEY=...
 ```
 
-<details>
-  <summary>Click to expand the output</summary>
+**Gemini** (eval / fallback):
 
-```powershell
-Filter by name? [y/N] y
-Platform name substring: windows 11
-Possible matches:
-1) Windows 11 HLK 22H2
-2) Windows 11 HLK 24H2
-3) Windows 11 Version 22H2 for ARM64-based Systems
-4) Windows 11 Version 22H2 for x64-based Systems
-5) Windows 11 Version 23H2 for ARM64-based Systems
-6) Windows 11 Version 23H2 for x64-based Systems
-7) Windows 11 Version 24H2 for ARM64-based Systems
-8) Windows 11 Version 24H2 for x64-based Systems
-Choose 1-8 [1]: 8
-Selected product id: {'12390'}
-List 2025-May CVEs for ['Windows 11 Version 24H2 for x64-based Systems'] - {'12390'}
-
- shape: (36, 2)
-┌────────────────┬──────────────────────────────────────────────────────────────┐
-│ CVE            ┆ Title                                                        │
-│ ---            ┆ ---                                                          │
-│ str            ┆ str                                                          │
-╞════════════════╪══════════════════════════════════════════════════════════════╡
-│ CVE-2025-24063 ┆ Kernel Streaming Service Driver Elevation of Privilege       │
-│                ┆ Vulnerability                                                │
-│ CVE-2025-27468 ┆ Windows Kernel-Mode Driver Elevation of Privilege            │
-│                ┆ Vulnerability                                                │
-│ CVE-2025-29829 ┆ Windows Trusted Runtime Interface Driver Information         │
-│                ┆ Disclosure Vulnerability                                     │
-│ CVE-2025-29830 ┆ Windows Routing and Remote Access Service (RRAS) Information │
-│                ┆ Disclosure Vulnerability                                     │
-│ CVE-2025-29832 ┆ Windows Routing and Remote Access Service (RRAS) Information │
-│                ┆ Disclosure Vulnerability                                     │
-│ CVE-2025-29833 ┆ Microsoft Virtual Machine Bus (VMBus) Remote Code Execution  │
-│                ┆ Vulnerability                                                │
-│ CVE-2025-29835 ┆ Windows Remote Access Connection Manager Information         │
-│                ┆ Disclosure Vulnerability                                     │
-│ CVE-2025-29836 ┆ Windows Routing and Remote Access Service (RRAS) Information │
-│                ┆ Disclosure Vulnerability                                     │
-│ CVE-2025-29837 ┆ Windows Installer Information Disclosure Vulnerability       │
-│ CVE-2025-29838 ┆ Windows ExecutionContext Driver Elevation of Privilege       │
-│                ┆ Vulnerability                                                │
-│ CVE-2025-29839 ┆ Windows Multiple UNC Provider Driver Information Disclosure  │
-│                ┆ Vulnerability                                                │
-│ CVE-2025-29841 ┆ Universal Print Management Service Elevation of Privilege    │
-│                ┆ Vulnerability                                                │
-│ CVE-2025-29842 ┆ UrlMon Security Feature Bypass Vulnerability                 │
-│ CVE-2025-29955 ┆ Windows Hyper-V Denial of Service Vulnerability              │
-│ CVE-2025-29956 ┆ Windows SMB Information Disclosure Vulnerability             │
-│ CVE-2025-29957 ┆ Windows Deployment Services Denial of Service Vulnerability  │
-│ CVE-2025-29958 ┆ Windows Routing and Remote Access Service (RRAS) Information │
-│                ┆ Disclosure Vulnerability                                     │
-│ CVE-2025-29959 ┆ Windows Routing and Remote Access Service (RRAS) Information │
-│                ┆ Disclosure Vulnerability                                     │
-│ CVE-2025-29960 ┆ Windows Routing and Remote Access Service (RRAS) Information │
-│                ┆ Disclosure Vulnerability                                     │
-│ CVE-2025-29961 ┆ Windows Routing and Remote Access Service (RRAS) Information │
-│                ┆ Disclosure Vulnerability                                     │
-│ CVE-2025-29962 ┆ Windows Media Remote Code Execution Vulnerability            │
-│ CVE-2025-29963 ┆ Windows Media Remote Code Execution Vulnerability            │
-│ CVE-2025-29964 ┆ Windows Media Remote Code Execution Vulnerability            │
-│ CVE-2025-29966 ┆ Remote Desktop Client Remote Code Execution Vulnerability    │
-│ CVE-2025-29967 ┆ Remote Desktop Client Remote Code Execution Vulnerability    │
-│ CVE-2025-29969 ┆ MS-EVEN RPC Remote Code Execution Vulnerability              │
-│ CVE-2025-29970 ┆ Microsoft Brokering File System Elevation of Privilege       │
-│                ┆ Vulnerability                                                │
-│ CVE-2025-29971 ┆ Web Threat Defense (WTD.sys) Denial of Service Vulnerability │
-│ CVE-2025-29974 ┆ Windows Kernel Information Disclosure Vulnerability          │
-│ CVE-2025-30385 ┆ Windows Common Log File System Driver Elevation of Privilege │
-│                ┆ Vulnerability                                                │
-│ CVE-2025-30388 ┆ Windows Graphics Component Remote Code Execution             │
-│                ┆ Vulnerability                                                │
-│ CVE-2025-30397 ┆ Scripting Engine Memory Corruption Vulnerability             │
-│ CVE-2025-30400 ┆ Microsoft DWM Core Library Elevation of Privilege            │
-│                ┆ Vulnerability                                                │
-│ CVE-2025-32701 ┆ Windows Common Log File System Driver Elevation of Privilege │
-│                ┆ Vulnerability                                                │
-│ CVE-2025-32706 ┆ Windows Common Log File System Driver Elevation of Privilege │
-│                ┆ Vulnerability                                                │
-│ CVE-2025-32709 ┆ Windows Ancillary Function Driver for WinSock Elevation of   │
-│                ┆ Privilege Vulnerability                                      │
-└────────────────┴──────────────────────────────────────────────────────────────┘
-This operation may take long time. Do you want to continue? [y/N]
-```                
-</details>
----
-
-And if you want to retrieve a cached report, you can use the simple command:
-```powershell
-> python.exe .\patchdiff_ai.py get_cached_report CVE-2025-24035
+```env
+GOOGLE_API_KEY=...
 ```
-![get_cached.gif](rsrc/get_cached.gif)
 
-And if the report exist the system will retrieve it and print it out.  
+**Per-purpose model overrides** (optional — defaults are in
+[src/patchdiff_ai/llm/catalog.py](src/patchdiff_ai/llm/catalog.py)):
+
+```env
+MODELS_DEFAULT=azure.o4-mini
+MODELS_GATHER_INFO=azure.gpt-4.1-nano
+MODELS_PLATFORM_INTERNALS=azure.gpt-4.1-mini
+MODELS_REVERSE_ENGINEERING=azure.o3-mini
+MODELS_RESEARCHER=azure.o3
+MODELS_EMBEDDING=azure.text-embedding-3-small
+```
+
+**Tool paths** (override only if non-default):
+
+```env
+TOOLS__SEVEN_ZIP=C:/Program Files/7-Zip/7z.exe
+TOOLS__IDA=C:/Program Files/IDA Pro 8.0/idat64.exe
+```
+
+**Filesystem layout** (defaults shown):
+
+```env
+PATHS__DB_DIR=db
+PATHS__REPORTS_DIR=reports
+PATHS__TEMP_DIR=_temp
+PATHS__LOGS_DIR=logs
+```
+
+**Telemetry**:
+
+LangSmith / LangChain tracing is force-disabled at startup, and Chroma's
+anonymous telemetry is disabled before the client is imported. No
+observability data leaves the machine — everything goes to structlog and
+the per-run log file under `logs/`.
 
 ---
 
-## Sample Output
+## Usage
 
-Below is an excerpt from the auto‑generated report for **CVE‑2025‑32713** (full file lives in `reports/`):
+### Single CVE
 
-
-<details>
-  <summary>Click to view detailed diff & call‑stack</summary>
-
-```markdown
---------------------------------------------------------------------
-CVE-2025-32713 Report
---------------------------------------------------------------------
-
-Detailed Root Cause Analysis
---------------------------------------------------------------------
-The caller supplies a _CLFS_READ_BUFFER structure (a5) which contains
-an address returned through _CLFS_READ_BUFFER::GetAddress().  The size
-of this heap buffer is passed separately in parameter a6.
-
-Inside ReadLogBlock() the driver iterates over the log file and fills
-the caller’s buffer in chunks.  The following variables control the
-copy size per iteration:
-  v24 / v25      – overall request length (from a6)
-  *a10           – running count of bytes already written
-  v27 (renamed v28 in patch) – *current* chunk size to copy
-  v48            – physical sector / log page size fetched from the
-                    on-disk log header
-
-Pre-patch logic derives v27 like this:
-  v27 = v24 - *a10;               // remaining caller space
-  if(first_iteration && (a4 & 1)) // header request
-        v27 = v48;                // **force log-page size**
-After that, without any further validation, either
-  • CClfsLogFcbPhysical::ReadLog() (for packed logs)   or
-  • CcCopyRead() (for cached logs)
-writes v27 bytes to the buffer pointed to by v51.
-
-If v27 is larger than the remaining space (a6-*a10) the write overruns
-the heap allocation supplied by user land, corrupting adjacent kernel
-heap memory.  An attacker can reach this state by:
-  1. Supplying a deliberately small read buffer (a6)
-  2. Crafting a log file whose page size (v48) is larger than the
-     provided buffer and by requesting header mode (a4==1).
-The lack of an alignment check (v27 %% v48) and of a final bounds test
-(v27 <= a6-*a10) constitutes the exact defect.
-
-Once corrupted, the CLFS heap block resides in kernel address space;
-controlled data written past the end can be used to change function
-pointers or object headers, allowing privileged code execution.
-
-Vulnerability Code Snippets
---------------------------------------------------------------------
-\```c
-// pre-patch: chunk size forced to page size without bounds check
-if ((v73 & 1) && !*a10) {
-    v27 = v48;          // page size from log header
-    v47 = v48;
-}
-...
-CcCopyRead(a2, &FileOffset, v27, 1u, v51, &IoStatus); // overflow
-
-// patch: abort if misaligned and additional size sanity check
-if (FeatureFlag() && v28 % v48) {
-    v12 = STATUS_INVALID_PARAMETER;
-    ...
-}
-...
-if (FeatureFlag()) {
-    if (FileOffset.QuadPart < 0 ||
-        v32 - *a10 < v28 ||                // new bound check
-        RtlLongLongAdd(...) < 0 ||
-        NewEnd > MaxLogSize) {
-        v12 = STATUS_LOG_CORRUPTION;
-    }
-}
-\```
-
-Trigger Flow (Top-Down)
---------------------------------------------------------------------
-User mode               -> nt!NtReadFile on a CLFS log stream
-FS miniredirector       -> clfs!CClfsClientReadLogRecord()
-clfs.sys                -> CClfsLogFcbPhysical::ReadLogBlock()
-  └── computes v27               (faulty)
-  └── calls CcCopyRead()/ReadLog  (overflow occurs)
-
-Attack Vector
---------------------------------------------------------------------
-Local, authenticated attacker creates or opens a writable CLFS log,
-submits a small read buffer to ClfsReadLogRecord() (or similar), and
-crafts the log header so that the page size (v48) exceeds the supplied
-buffer.  The subsequent kernel copy overruns heap memory, enabling
-privilege escalation.
-
+```powershell
+patchdiff-ai cve CVE-2025-29824
 ```
 
-</details>
+Useful flags:
+
+- `--interrupt` — pause for interactive candidate refinement before the RE
+  pipeline. The CLI prompts twice per refinement round: first for kind +
+  query (`semantic` / `filename`), then for which entries from the search
+  results to add. Refinement is constrained to files that actually changed
+  in this KB.
+- `--chat` — drop into an interactive chat REPL after the run completes.
+  Built-in commands (`help`, `reports`, `save reports`, `delete all reports`,
+  `reanalyze`, `change assistant`, `exit`) are dispatched directly;
+  anything else routes through a ReAct agent with tool-calling that gates
+  every tool call behind a `[y/N]` approval prompt.
+- `--chat-permissive` — same REPL as `--chat` but the ReAct agent skips the
+  `[y/N]` prompt and runs every tool call automatically. Implies `--chat`.
+  Use it when you trust the agent (e.g. read-only tool set on your own
+  machine) and don't want to babysit each call.
+- `--eval` — run the report-generation step against multiple LLMs in parallel
+  (useful for benchmarking or for picking the most confident output).
+- `--platform windows` — explicit platform-plugin override. Default is
+  auto-detect via each plugin's `matches()`. Windows is the only registered
+  platform today.
+- `--platform-ids 12390` — pin the MSRC product ID instead of inferring it
+  from the host OS. Orthogonal to `--platform`; only the Windows plugin
+  consumes it.
+
+### Chat tools
+
+The ReAct agent under `--chat` / `--chat-permissive` has access to two tool
+families. **Native tools** are implemented in this repo and always available.
+**IDA / idalib MCP tools** come from the bundled `ida-pro-mcp` server
+(lazy-spawned on first call, requires IDA 9.x with idalib activated) and are
+sandboxed to binaries under `db/patch_store/` — start a session with
+`list_patch_store` → `idalib_open <abs-path>` before calling any analysis
+tool. Tools that mutate the IDB (`patch*`), execute Python (`py_eval`,
+`py_exec`, `py_run_file`), or drive the debugger (`dbg_*`) are stripped from
+the catalogue.
+
+#### Native
+
+| Tool             | Description                                                                                |
+|------------------|--------------------------------------------------------------------------------------------|
+| `show_report`    | Show cached RCA report(s) for the current CVE. Optional `model_name` filters by exact match. |
+| `search_reports` | Semantic search over RCA reports across all cached CVEs.                                   |
+| `list_patch_store` | List binaries under `db/patch_store/` — pass an absolute path to `idalib_open`.          |
+| `reanalyze`      | Re-run the full pipeline graph for the current CVE.                                        |
+
+The chat REPL also accepts the slash-style hardcoded commands listed in
+[`chat.py`](src/patchdiff_ai/cli/chat.py)'s `HELP_TEXT` (`reports`,
+`save reports`, `delete all reports`, `reanalyze`, `change assistant`,
+`exit`) — these short-circuit before the agent runs.
+
+#### IDA / idalib MCP
+
+**Server & instance management**
+
+| Tool             | Description                                                                |
+|------------------|----------------------------------------------------------------------------|
+| `server_health`  | Health/ready probe for the MCP server and current IDB state.               |
+| `server_warmup`  | Warm up IDA subsystems to reduce first-call latency and transient failures.|
+| `list_instances` | List discovered IDA Pro instances with binary, port, and reachability.     |
+| `select_instance`| Switch to a different IDA Pro instance for subsequent calls.               |
+| `open_file`      | Open a file in a new IDA Pro instance.                                     |
+| `idb_save`       | Save the active IDB to disk, optionally to a provided path.                |
+
+**Listing & queries**
+
+| Tool           | Description                                                                |
+|----------------|----------------------------------------------------------------------------|
+| `lookup_funcs` | Get functions by address or name (auto-detects).                           |
+| `list_funcs`   | List functions with optional filtering and offset/count pagination.        |
+| `func_query`   | Query functions with richer filtering than `list_funcs`.                   |
+| `list_globals` | List globals with optional filtering and offset/count pagination.          |
+| `entity_query` | Query IDB entities with typed filters, projection, and pagination.         |
+| `imports`      | List imports with module names using offset/count pagination.              |
+| `imports_query`| Query imports with richer filtering than `imports(offset,count)`.          |
+| `insn_query`   | Query instructions with mnemonic/operand filters and scoped scans.         |
+| `int_convert`  | Convert numbers to different formats.                                      |
+
+**Disassembly & decompilation**
+
+| Tool            | Description                                                                |
+|-----------------|----------------------------------------------------------------------------|
+| `decompile`     | Decompile function(s) at address(es); returns pseudocode and per-item errors. |
+| `disasm`        | Disassemble function with offset/`max_instructions` pagination and optional total count. |
+| `basic_blocks`  | Return function CFG blocks with offset/`max_blocks` pagination.            |
+| `export_funcs`  | Export function data for addresses in `json` / `c_header` / `prototypes` formats. |
+
+**Search**
+
+| Tool          | Description                                                                |
+|---------------|----------------------------------------------------------------------------|
+| `find_regex`  | Search strings by case-insensitive regex with offset/limit pagination.     |
+| `search_text` | Search the rendered listing using IDA's native text search (fast C++ scan).|
+| `find_bytes`  | Search byte patterns (supports `??`) with offset/limit pagination.         |
+| `find`        | Search strings/immediates/refs for targets with offset/limit pagination.   |
+
+**Cross-references & call graph**
+
+| Tool             | Description                                                                |
+|------------------|----------------------------------------------------------------------------|
+| `xrefs_to`       | Return xrefs to address(es) or named symbols, capped per target with truncation flag. |
+| `xref_query`     | Query xrefs with direction/type filters and pagination.                    |
+| `xrefs_to_field` | Get cross-references to structure fields.                                  |
+| `callees`        | Return unique callees per function, capped by limit.                       |
+| `callgraph`      | Build a bounded callgraph from roots with depth/node/edge limits.          |
+
+**Function & component analysis**
+
+| Tool                | Description                                                             |
+|---------------------|-------------------------------------------------------------------------|
+| `func_profile`      | Profile functions with summary metrics and optional sampled details.    |
+| `analyze_batch`     | Run comprehensive analysis over one or more target functions.           |
+| `analyze_function`  | Compact single-function analysis: pseudocode, strings, constants, callers, callees, xrefs, blocks. |
+| `analyze_component` | Analyze related functions as a group: per-function summaries, internal call graph, shared data. |
+| `survey_binary`     | Get a compact overview of the binary in one call.                       |
+| `trace_data_flow`   | Follow cross-references from or to an address, automatically traversing.|
+
+**Memory I/O**
+
+| Tool               | Description                                                              |
+|--------------------|--------------------------------------------------------------------------|
+| `get_bytes`        | Read bytes from memory addresses.                                        |
+| `get_int`          | Read integer values from memory addresses.                               |
+| `get_string`       | Read strings from memory addresses.                                      |
+| `get_global_value` | Read global variable values by address or symbol name.                   |
+| `put_int`          | Write integer values to memory addresses.                                |
+| `read_struct`      | Read struct fields from memory at address; auto-detect type when possible.|
+
+**Types**
+
+| Tool                | Description                                                             |
+|---------------------|-------------------------------------------------------------------------|
+| `declare_type`      | Declare C type definitions in the local type library.                   |
+| `enum_upsert`       | Create or extend local enums idempotently.                              |
+| `search_structs`    | Search local structs/unions by name pattern.                            |
+| `type_query`        | Query local types with structured filters/projection-friendly output.   |
+| `type_inspect`      | Inspect named types (size/kind/declaration/members).                    |
+| `set_type`          | Apply types (function/global/local/stack).                              |
+| `type_apply_batch`  | Apply multiple type edits and return aggregate status.                  |
+| `infer_types`       | Infer and apply likely types at target addresses.                       |
+
+**Code editing**
+
+| Tool              | Description                                                               |
+|-------------------|---------------------------------------------------------------------------|
+| `set_comments`    | Set comments at addresses (both disassembly and decompiler views).        |
+| `append_comments` | Append comments at addresses, deduping exact text by default.             |
+| `rename`          | Batch-rename funcs/globals/locals/stack vars with dry-run options.        |
+| `define_func`     | Define functions; IDA infers bounds unless `end` is provided.             |
+| `define_code`     | Convert bytes to code instruction(s) at address(es).                      |
+| `undefine`        | Undefine item(s) at address(es), converting back to raw bytes.            |
+
+**Stack frames**
+
+| Tool             | Description                                                                |
+|------------------|----------------------------------------------------------------------------|
+| `stack_frame`    | Return stack variables for function address(es).                           |
+| `declare_stack`  | Create stack variables from typed stack declarations.                      |
+| `delete_stack`   | Delete stack variables by name or offset.                                  |
+
+**Signatures**
+
+| Tool                          | Description                                                  |
+|-------------------------------|--------------------------------------------------------------|
+| `make_signature`              | Create unique byte signatures for addresses (shortest pattern). |
+| `make_signature_for_function` | Create unique byte signatures for function entry points.     |
+| `make_signature_for_range`    | Create a byte signature for a specific address range.        |
+| `find_xref_signatures`        | Find signatures for code locations that reference an address.|
+
+### A whole Patch Tuesday
+
+```powershell
+patchdiff-ai month 2025-Apr --platform-ids 12390
+```
+
+Filters by `--platform-name` (substring match), `--platform-ids` (comma-separated MSRC
+product IDs), or both. Runs every matching CVE end-to-end, sequentially.
+
+### Cached reports
+
+```powershell
+patchdiff-ai cached --cve CVE-2025-29824
+patchdiff-ai cached --month 2025-Apr --platform-ids 12390
+```
+
+Reads back any reports already persisted to the `reports` Chroma collection and
+saves them under `reports/`.
+
+### Verbosity
+
+```powershell
+patchdiff-ai -L debug cve CVE-2025-29824
+patchdiff-ai -L trace cve CVE-2025-29824   # full crash tracebacks to log file
+```
+
+Logs are JSON by default and tee'd to both stderr and `logs/<unix>.<uuid>.log`.
 
 ---
 
-## Extending the Graph
+## Output
 
-The decision for using Langgraph was to provide an extensible architecture where anyone that is familiar with it could <br>
-contribute with ease. Langgraph has advantages but also disadvantages like stability, steep learning curve, and<br>
-over-abstraction.
+Reports are written to:
 
-This tool is just the tip of the iceberg in what can be done using LLMs for vulnerability assessments and analysis.<br>
-The next steps that should be taken are:
-1. Implement `ReAct` to the refinement process
-2. Gather multiple CVEs with the same source file for correlation analysis
-3. Improve memory usage
-4. Create better heuristics upon the bindiff reults
-5. Include call flow for heuristics as well as for LLM context
-6. Add Ghidra support
-7. Use Windows installation images as base winsxs sources
-8. Port the code to run on Unix systems
-9. Add MCP interfaces to the various agents
-10. Use the function vectorstore to identify semantically related code and logics to find 0-days with CVE as reference
-11. The list is too long... take a moment and contribute
+- **Vector store**: `db/` Chroma — three collections persist analysis state:
+  `windows.exe.desc` (file descriptions for candidate retrieval),
+  `windows.exe.functions.logic` (per-function summaries), and
+  `windows.exe.rca.reports` (the final RCA reports — used to short-circuit
+  re-runs and serve `patchdiff-ai cached`).
+- **Filesystem**: `reports/<CVE>_<file>.txt` — plain ASCII, human-readable.
 
-As for the code practice and quality, improvement and suggestions are welcome.
+Each report includes:
+
+- The CVE ID and MSRC metadata
+- The vulnerable file / function and its address
+- Pre-patch and post-patch decompiled C
+- Unified diff of the change
+- A root-cause narrative (the LLM's analysis)
+- A confidence score (0.0 - 1.0)
+- The model that authored the report
+
+In `--eval` mode, multiple reports are produced (one per model in
+`EVAL_MODELS` — see [src/patchdiff_ai/llm/catalog.py](src/patchdiff_ai/llm/catalog.py)).
 
 ---
 
-## Contributing
+## Logging & observability
 
-* **Fork** → **branch** → **PR**. Use descriptive commit messages.
-* Due to limited attention, we recommend to PR small, readable and tested changes.
+- **Dual-stream structlog**: terminal (stderr) gets the colorized console renderer for human reading; the per-run log file gets line-oriented JSON for grep/jq.
+- Every event carries the bound `cve` and `run_id` (a 12-char hex) via contextvars.
+- An `LLMMetricsHandler` callback emits one `llm_call` event per LangChain
+  invocation with model name, latency, token counts, and computed cost (using
+  `ModelSpec.cost_per_mtok`).
+- `cve_run_complete` is logged once per CVE with the report count.
+- LangSmith / LangChain tracing is force-disabled at startup; Chroma anonymous
+  telemetry is disabled before import. No data leaves the machine.
+
+---
+
+## Extending
+
+There are three places to add capabilities; pick the smallest one that fits.
+
+**A new platform** (Linux distro / Android / macOS / packaged app): implement
+the `Platform` protocol at
+[src/patchdiff_ai/platforms/base.py](src/patchdiff_ai/platforms/base.py) and
+register it in
+[src/patchdiff_ai/platforms/__init__.py](src/patchdiff_ai/platforms/__init__.py).
+Five methods to implement: `matches(cve_id)`, `enrich_cve(state, ctx)`,
+`gather_packages(state, ctx)`, `candidate_prompts()`, `candidate_metadata(cve)`.
+[`platforms/windows.py`](src/patchdiff_ai/platforms/windows.py) is the
+reference implementation — it delegates to existing `patches/*` modules and
+the Windows gather subgraph.
+
+**A new analysis stage**:
+
+- **A new node inside an existing subgraph** — e.g. a call-flow extraction step in
+  the RE subgraph at [src/patchdiff_ai/graphs/reverse_engineering/](src/patchdiff_ai/graphs/reverse_engineering/).
+- **A new subgraph** — define a `state.py` (Pydantic v2 BaseModel) + `nodes.py` +
+  `graph.py`, register it on the pipeline at
+  [src/patchdiff_ai/graphs/pipeline/graph.py](src/patchdiff_ai/graphs/pipeline/graph.py),
+  and wire a stage transition in
+  [src/patchdiff_ai/graphs/pipeline/routing.py](src/patchdiff_ai/graphs/pipeline/routing.py).
+
+**A new LLM provider** is two files:
+
+1. `src/patchdiff_ai/llm/providers/<name>.py` — a `build_<name>_chat(spec, creds)` factory.
+2. Register the provider in `Provider`, the catalog, and `ModelRegistry._build`.
+
+**A new external tool**: drop it under `src/patchdiff_ai/tools/`, build it on top
+of [`tools/process.py`](src/patchdiff_ai/tools/process.py)'s `run()` (mandatory
+timeout, no `shell=True`), expose its executable path through
+[`config/tools.py`](src/patchdiff_ai/config/tools.py), and inject via
+`AppContext.tools`.
+
+---
+
+## Project layout
+
+```
+patchdiff-ai/
+├── pyproject.toml
+├── readme.md                       # this file
+├── CLAUDE.md                       # project instructions for Claude Code
+├── docs/
+│   └── Architecture.md             # full architecture write-up
+├── .plan/
+│   └── refactor-plan.md            # design + milestone plan
+├── src/patchdiff_ai/
+│   ├── __init__.py                 # exposes run_cve()
+│   ├── __main__.py                 # python -m patchdiff_ai
+│   ├── cli/                        # typer entry points + chat REPL
+│   ├── config/                     # pydantic-settings models
+│   ├── llm/                        # registry + provider factories
+│   ├── observability/              # structlog + callbacks + progress
+│   ├── persistence/                # Chroma + patch-store + disk caches
+│   ├── platforms/                  # Platform protocol + windows plugin
+│   ├── prompts/                    # system prompts (markdown)
+│   ├── runtime/                    # AppContext + orchestrator + interactivity
+│   ├── schemas/                    # Pydantic v2 cross-agent contracts
+│   ├── tools/                      # 7-Zip, IDA, BinDiff, PSF, Delta, manifest
+│   ├── patches/                    # CVE / KB / extraction pipeline
+│   └── graphs/                     # pipeline + four subgraphs
+├── db/                             # Chroma + patch-store on disk
+├── reports/                        # human-readable reports
+├── _temp/                          # downloaded + extracted KBs
+├── logs/                           # per-run JSON logs
+└── patchdiff-ai-wip-models_config/ # legacy reference (gitignored)
+```
 
 ---
 
@@ -361,8 +570,14 @@ As for the code practice and quality, improvement and suggestions are welcome.
 
 Copyright 2025 Akamai Technologies Inc.
 
-Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+these files except in compliance with the License. You may obtain a copy of the
+License at
 
->http://www.apache.org/licenses/LICENSE-2.0
+> http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
+

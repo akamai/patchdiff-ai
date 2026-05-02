@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "patchdiff-ai"
+version = "0.1.0"
+description = "Greenfield rewrite of PatchDiff-AI: CVE -> Windows patch RCA report."
+readme = "CLAUDE.md"
+requires-python = ">=3.11"
+dependencies = [
+    # Versions are frozen to the working set; bump deliberately, not casually.
+    # langchain 1.x is the floor (`langchain.agents.create_agent` replaced
+    # the deprecated `langgraph.prebuilt.create_react_agent`).
+    "azure-core==1.39.0",
+    "azure-identity==1.25.3",
+    "chromadb==1.5.8",
+    "langchain==1.2.15",
+    "langchain-anthropic==1.4.1",
+    "langchain-chroma==1.1.0",
+    "langchain-community==0.4.1",
+    "langchain-core==1.3.2",
+    "langchain-google-genai==3.2.0",
+    "langchain-openai==1.2.1",
+    "langgraph==1.1.10",
+    "langgraph-checkpoint==4.0.3",
+    # IDA Pro MCP — drives idalib in a headless subprocess; pulled from GitHub
+    # because there's no PyPI package. Pinned to a specific commit so reinstalls
+    # are deterministic; bump the SHA deliberately when upgrading.
+    # `mcp` (the SDK + streamable-http transport) comes transitively through
+    # this dependency — no need to pin separately.
+    "ida-pro-mcp @ git+https://github.com/mrexodia/ida-pro-mcp.git@40e94f36f94043fd1824661e32ad72a903ec9e2f",
+    "lxml_html_clean==0.4.4",
+    "pefile==2024.8.26",
+    "polars==1.40.1",
+    "pydantic==2.13.3",
+    "pydantic-settings==2.14.0",
+    "python-bindiff==0.3.4",
+    "python-binexport==0.4.2",
+    "python-dotenv==1.2.2",
+    "requests==2.33.1",
+    "requests-html==0.10.0",
+    "rich==15.0.0",
+    "structlog==25.5.0",
+    "tenacity==9.1.4",
+    "typer==0.25.0",
+]
+
+[project.scripts]
+patchdiff-ai = "patchdiff_ai.cli.app:main"
+
+[tool.hatch.metadata]
+# `ida-pro-mcp` is sourced from GitHub (no PyPI release). Direct refs are
+# rejected by default; enable explicitly so editable installs work.
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/patchdiff_ai"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/patchdiff_ai", "CLAUDE.md"]
