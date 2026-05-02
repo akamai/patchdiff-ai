@@ -12,6 +12,7 @@ import logging
 import sys
 import time
 import uuid
+import warnings
 from pathlib import Path
 from typing import IO, Callable
 
@@ -227,6 +228,19 @@ def configure_logging(
         "asyncio",
     ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    # `warnings` (different machinery from `logging` — silenced separately).
+    # langchain_openai's `with_structured_output(SomeBaseModel)` path
+    # writes the parsed BaseModel into an internal slot pydantic types
+    # as `None`; pydantic's strict serializer flags it on every call.
+    # Harmless, but spams stderr once per LLM call. Filter is narrow:
+    # only this exact field's mismatch from pydantic.main.
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Pydantic serializer warnings:[\s\S]*field_name='parsed'",
+        category=UserWarning,
+        module=r"pydantic\.main",
+    )
 
     timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
 

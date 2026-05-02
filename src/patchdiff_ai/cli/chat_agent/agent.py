@@ -43,13 +43,53 @@ def _make_agent_tools(catalogue: ToolCatalogue, artifacts: list[Any]):
     """Build the always-on tools + meta-tools, closing over `catalogue`."""
 
     @tool
-    def list_tools(name_filter: str = "") -> str:
-        """List catalogue tools, optionally filtered by name/description substring."""
-        entries = catalogue.list(name_filter)
+    def list_tools(tag: str = "", name_filter: str = "") -> str:
+        """Discover catalogue tools.
+
+        With no args: returns a tag overview — each tag with its tool
+        count and the first few tool names. Tools carrying multiple
+        tags appear under each.
+
+        With `tag="X"`: returns every tool tagged X, one per line, with
+        the first line of each description.
+
+        With `name_filter="..."`: substring search across all tags on
+        tool name + description (combine with `tag` to AND-filter).
+
+        After picking a tool, call `describe_tool(name)` for its
+        argument schema, then `call_tool(name, {...})` to invoke.
+        """
+        if not tag and not name_filter:
+            tags = catalogue.list_tags()
+            if not tags:
+                return "Catalogue is empty."
+            lines = []
+            for t in sorted(tags):
+                names = tags[t]
+                sample = ", ".join(names[:6])
+                more = f", … (+{len(names) - 6} more)" if len(names) > 6 else ""
+                lines.append(f"{t:22} ({len(names):>3}): {sample}{more}")
+            lines.append("")
+            lines.append(
+                "Drill in with list_tools(tag=\"<name>\") for full "
+                "listings, or list_tools(name_filter=\"...\") for substring "
+                "search across all tags."
+            )
+            return "\n".join(lines)
+
+        entries = catalogue.list(name_filter=name_filter, tag=tag)
         if not entries:
-            return f"No tools match {name_filter!r}." if name_filter else "Catalogue is empty."
-        lines = [f"{e['name']:32} [{e['tier']}]  {e['description'].splitlines()[0] if e['description'] else ''}"
-                 for e in entries]
+            ctx_bits = []
+            if tag:
+                ctx_bits.append(f"tag={tag!r}")
+            if name_filter:
+                ctx_bits.append(f"name_filter={name_filter!r}")
+            return f"No tools match {' + '.join(ctx_bits)}."
+        lines = []
+        for e in entries:
+            tag_str = ", ".join(e["tags"]) if e["tags"] else "general"
+            desc_first = e["description"].splitlines()[0] if e["description"] else ""
+            lines.append(f"{e['name']:32} [{tag_str}]  {desc_first}")
         return "\n".join(lines)
 
     @tool

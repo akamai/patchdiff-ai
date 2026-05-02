@@ -1,77 +1,77 @@
-"""`patchdiff-ai cve <CVE>` — single-CVE end-to-end run."""
+"""`patchdiff-ai cve <CVE>` — single-CVE end-to-end run with NVD auto-detect.
+
+Resolves a `(provider, concrete Platform)` pair via NVD (or `--platform`
+override), then forwards to `cli.runner.run_single_cve`. Provider-specific
+flags (e.g. `--platform-id`, `--distro`) live on the provider's own
+`<provider> cve` sub-command — this top-level shortcut runs with sane
+defaults only.
+"""
 
 from __future__ import annotations
 
-import typer
+import re
 
-from patchdiff_ai.cli.validators import cve_value, platform_ids
-from patchdiff_ai.config.settings import get_settings
-from patchdiff_ai.observability.progress import make_reporter
-from patchdiff_ai.runtime.app_context import AppContext
-from patchdiff_ai.runtime.cancel import run_cancellable
-from patchdiff_ai.runtime.orchestrator import run_cve
+import click
 
-app = typer.Typer(help="Run analysis for a single CVE.")
+from patchdiff_ai.cli.options import cve_options
+from patchdiff_ai.cli.runner import run_single_cve
+from patchdiff_ai.platforms import (
+    UnknownPlatform,
+    UnsupportedPlatform,
+    providers,
+    resolve_for_cve,
+)
+
+CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,7}$", re.IGNORECASE)
 
 
-@app.callback(invoke_without_command=True)
+def _validate_cve(ctx: click.Context, param: click.Parameter, value: str) -> str:
+    if not CVE_RE.match(value):
+        raise click.BadParameter(
+            "Invalid CVE format; expected CVE-YYYY-NNNN[...] (e.g. CVE-2025-29824)"
+        )
+    return value.upper()
+
+
+@click.command(
+    "cve",
+    help="Run RCA on a single CVE. Auto-detects the platform via NVD CPE data.",
+)
+@click.argument(
+    "cve_id",
+    metavar="CVE-YYYY-NNNNN",
+    callback=_validate_cve,
+)
+@click.option(
+    "--platform",
+    "platform_override",
+    type=click.Choice([p.name for p in providers()], case_sensitive=False),
+    default=None,
+    help="Override the platform plugin (e.g. windows). Default: auto-detect via NVD.",
+)
+@cve_options
+@click.pass_context
 def cve_command(
-    cve_id: str = typer.Argument(..., callback=cve_value, metavar="CVE-YYYY-NNNNN"),
-    eval_mode: bool = typer.Option(False, "--eval", help="Generate reports across multiple models."),
-    interactive: bool = typer.Option(False, "--interrupt", help="Allow interactive refinement."),
-    chat: bool = typer.Option(False, "--chat", help="Drop into an interactive chat after the run completes."),
-    chat_permissive: bool = typer.Option(
-        False,
-        "--chat-permissive",
-        help="Like --chat but the ReAct agent runs tools without asking for y/N approval.",
-    ),
-    platform_name: str = typer.Option(
-        "",
-        "--platform",
-        help="Override the platform plugin (e.g. windows). Default: auto-detect.",
-    ),
-    platform: str = typer.Option(
-        "", "--platform-ids", help="Comma-separated MSRC product IDs."
-    ),
+    ctx: click.Context,
+    cve_id: str,
+    platform_override: str | None,
+    eval_mode: bool,
+    interrupt: bool,
+    chat: bool,
+    chat_permissive: bool,
 ) -> None:
-    """Generate an RCA report for a single CVE."""
-    settings = get_settings()
-    settings.paths.ensure()
-    ctx = AppContext.build(settings)
-
-    pids = platform_ids(platform)
-    selected_platform = None
-    if pids:
-        from patchdiff_ai.patches.platform_filter import get_platforms_by_ids
-
-        platforms = get_platforms_by_ids(pids)
-        if platforms:
-            selected_platform = next(iter(platforms))
-
     try:
-        with make_reporter() as progress:
-            ctx.progress = progress
-            # Share the live reporter with the idalib pool so each worker
-            # call surfaces a Rich spinner instead of log-line heartbeats.
-            if ctx.tools.idalib is not None:
-                ctx.tools.idalib.attach_progress(progress)
-            final_state = run_cancellable(
-                run_cve(
-                    ctx,
-                    cve_id,
-                    interactive=interactive,
-                    evaluate=eval_mode,
-                    platform=selected_platform,
-                    platform_name=platform_name or None,
-                )
-            )
-        # `--chat-permissive` implies `--chat`.
-        if chat or chat_permissive:
-            from patchdiff_ai.cli.chat import run_chat
+        provider, platform = resolve_for_cve(cve_id, platform_override=platform_override)
+    except (UnsupportedPlatform, UnknownPlatform) as exc:
+        raise click.UsageError(str(exc))
 
-            run_chat(
-                ctx, cve_id, state=final_state,
-                interactive=interactive, permissive=chat_permissive,
-            )
-    finally:
-        ctx.close()
+    click.echo(f"[*] Resolved platform: {provider.name} → {platform.name}")
+    run_single_cve(
+        ctx,
+        cve_id=cve_id,
+        platform=platform,
+        eval_mode=eval_mode,
+        interactive=interrupt,
+        chat=chat,
+        chat_permissive=chat_permissive,
+    )

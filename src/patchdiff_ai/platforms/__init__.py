@@ -1,134 +1,183 @@
-"""Platform plugin registry — driven by `resources/windows_sxs/platforms.json`.
+"""Platform plugin registry — provider-level.
 
-Each entry in the manifest becomes one `WindowsVersionedPlatform`
-instance backed by its `.7z` + `.bin` sibling. Adding a new Windows
-release means: run `python resources/index_winsxs.py` for it (which
-appends to the manifest), drop in the produced files. No code edits.
+Each `PlatformProvider` contributes one Click sub-group (`windows`,
+`linux`, ...). CVE→provider resolution is two-phase:
 
-The legacy monolithic `WindowsPlatform` is gone — there is no
-host-WinSxS reading path any more.
+  1. **Native, parallel.** Every provider's `matches_native(cve_id)`
+     runs concurrently against its own advisory source (Windows: MSRC
+     SUG, Linux: distro tracker). The first provider to claim the CVE
+     wins; ties pick by registration order.
+  2. **NVD fallback.** Only if every native check missed do we hit
+     NVD's CPE data and ask each provider's `matches_nvd(cpes)` in
+     order.
+
+Today: just `WindowsProvider`. Adding a second provider is a one-line
+append + an entry in this module.
 """
 
 from __future__ import annotations
 
+import asyncio
 from functools import lru_cache
-from pathlib import Path
 
 import structlog
 
-from patchdiff_ai.config.settings import get_settings
 from patchdiff_ai.platforms.base import (
     Platform,
+    PlatformProvider,
     UnknownPlatform,
     UnsupportedPlatform,
 )
-from patchdiff_ai.platforms.winsxs_archive import (
-    PlatformsManifest,
-    WinsxsArchive,
-    staleness_warning,
-)
-from patchdiff_ai.platforms.windows_versioned import WindowsVersionedPlatform
+from patchdiff_ai.platforms.linux import LinuxDistroPlatform, LinuxProvider
+from patchdiff_ai.platforms.windows import WindowsProvider, WindowsVersionedPlatform
 
 log = structlog.get_logger(__name__)
 
 
 @lru_cache(maxsize=1)
-def _build_registry() -> tuple[Platform, ...]:
-    """Load `platforms.json` and instantiate one plugin per entry.
+def providers() -> tuple[PlatformProvider, ...]:
+    """All registered providers, process-wide cached."""
+    return (WindowsProvider(), LinuxProvider())
 
-    Cached process-wide. The cache is keyed on no inputs (the manifest
-    path comes from settings, which is itself cached). Tests that need
-    to reset can call `_build_registry.cache_clear()`.
-    """
-    settings = get_settings()
-    manifest_path = settings.paths.platforms_manifest
-    archive_dir = settings.paths.windows_sxs_dir
-    seven_zip_path = settings.tools.seven_zip
-    if seven_zip_path is None:
-        raise RuntimeError(
-            "tools.seven_zip is not configured; can't extract WinSxS archives. "
-            "Set TOOLS__SEVEN_ZIP in your env."
-        )
 
-    from patchdiff_ai.tools.seven_zip import SevenZipTool
-    seven_zip = SevenZipTool(Path(seven_zip_path))
-
-    manifest = PlatformsManifest.load(manifest_path)
-    if not manifest.platforms:
-        log.warning(
-            "no_platforms_configured",
-            manifest=str(manifest_path),
-            hint="Run `python resources/index_winsxs.py <winsxs_dir> "
-                 "--product-id <id> --slug <slug>` to add one.",
-        )
-        return ()
-
-    warning = staleness_warning(manifest)
-    if warning is not None:
-        log.warning("platforms_manifest_stale", message=warning)
-
-    plugins: list[Platform] = []
-    for spec in manifest.platforms:
-        archive = WinsxsArchive(spec, archive_dir, seven_zip)
-        plugins.append(WindowsVersionedPlatform(spec, archive))
-    log.info(
-        "platforms_loaded",
-        count=len(plugins),
-        names=[p.name for p in plugins],
+def provider_by_name(name: str) -> PlatformProvider:
+    """Lookup a provider by `--platform <name>`."""
+    target = name.lower()
+    for p in providers():
+        if p.name.lower() == target:
+            return p
+    raise UnknownPlatform(
+        f"unknown platform {name!r}; registered: {[p.name for p in providers()]}"
     )
-    return tuple(plugins)
 
 
-def select_platform(cve_id: str, override: str | None = None) -> Platform:
-    """Pick a platform plugin by name (override) or auto-detect via `matches()`.
+async def _native_round(cve_id: str) -> tuple[PlatformProvider, Platform] | None:
+    """Run every provider's `matches_native` in parallel; return the first
+    `(provider, platform)` that claims the CVE, or None if all missed.
 
-    Auto-detect hits MSRC once (cheap; cached on the plugin) to confirm a
-    productId match. The first plugin to claim the CVE wins; ties are
-    broken by manifest order.
-
-    Raises:
-        `UnknownPlatform` — override doesn't resolve.
-        `UnsupportedPlatform` — no plugin claims the CVE.
+    Exceptions from individual providers are downgraded to misses with
+    a debug log — one provider's network blip shouldn't sink the whole
+    auto-detect.
     """
-    plugins = _build_registry()
-    if not plugins:
-        raise UnsupportedPlatform(
-            "no platforms configured. Run `python resources/index_winsxs.py` "
-            "to bundle a Windows version."
-        )
+    plugins = providers()
+    tasks = [asyncio.create_task(p.matches_native(cve_id)) for p in plugins]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    if override:
-        target = override.lower()
-        for p in plugins:
-            if p.name.lower() == target:
-                return p
-        raise UnknownPlatform(
-            f"unknown platform {override!r}; registered: {[p.name for p in plugins]}"
-        )
-    matched = [p for p in plugins if p.matches(cve_id)]
+    matched: list[tuple[PlatformProvider, Platform]] = []
+    for p, result in zip(plugins, results):
+        if isinstance(result, BaseException):
+            log.debug("matches_native_error", provider=p.name, error=str(result))
+            continue
+        if result is None:
+            continue
+        matched.append((p, result))
+
     if not matched:
-        raise UnsupportedPlatform(
-            f"no platform plugin claims {cve_id!r}. Configured platforms: "
-            f"{[p.name for p in plugins]}. The CVE may affect a Windows "
-            "release we haven't bundled yet — run "
-            "`python resources/index_winsxs.py` for the missing version, "
-            "or use `--platform <name>` to force one."
-        )
+        return None
     if len(matched) > 1:
+        names = [p.name for p, _ in matched]
         log.warning(
-            "multiple_platforms_match",
+            "multiple_providers_native_match",
             cve=cve_id,
-            matched=[p.name for p in matched],
-            picked=matched[0].name,
-            hint="pass `--platform <name>` to force a specific one",
+            matched=names,
+            picked=names[0],
+            hint="pass --platform <name> to force one",
         )
     return matched[0]
 
 
+def _nvd_round(cve_id: str) -> tuple[PlatformProvider, Platform] | None:
+    """Sync NVD fallback. Hits NVD's CPE list, then asks each provider's
+    `matches_nvd` in registration order. Returns the first claim or None
+    (also None if NVD has no data for this CVE)."""
+    from patchdiff_ai.platforms.nvd import cpes_for
+
+    cpes = cpes_for(cve_id)
+    if not cpes:
+        return None
+
+    for p in providers():
+        platform = p.matches_nvd(cpes)
+        if platform is not None:
+            log.info("nvd_fallback_match", cve=cve_id, provider=p.name,
+                     platform=platform.name)
+            return p, platform
+    return None
+
+
+def resolve_for_cve(
+    cve_id: str,
+    *,
+    platform_override: str | None = None,
+) -> tuple[PlatformProvider, Platform]:
+    """Resolve `cve_id` to `(provider, concrete Platform)`.
+
+    Order of operations:
+      0. If `--platform <name>` is given, look up that provider; ask it
+         to pick the right version (native first, then NVD, then
+         provider-default).
+      1. Otherwise: run every provider's `matches_native` in parallel.
+         First non-None wins.
+      2. If all native checks miss: query NVD once, ask each provider's
+         `matches_nvd`. First non-None wins.
+      3. Nothing claimed it: `UnsupportedPlatform`.
+    """
+    if platform_override:
+        provider = provider_by_name(platform_override)
+        try:
+            plat = asyncio.run(provider.matches_native(cve_id))
+        except RuntimeError:
+            # Edge case: an outer event loop is already running. Fall
+            # back to skipping the async native call here; NVD round
+            # below will still get a chance.
+            plat = None
+        if plat is not None:
+            return provider, plat
+        nvd_result = _nvd_round(cve_id)
+        if nvd_result is not None and nvd_result[0] is provider:
+            return nvd_result
+        # Last resort: provider-chosen default version.
+        log.info(
+            "platform_override_default_version",
+            cve=cve_id,
+            provider=provider.name,
+            hint="MSRC and NVD both missed; falling back to provider's default version.",
+        )
+        return provider, provider.resolve()
+
+    native = asyncio.run(_native_round(cve_id))
+    if native is not None:
+        return native
+
+    log.info("native_match_missed_falling_back_to_nvd", cve=cve_id)
+    nvd_result = _nvd_round(cve_id)
+    if nvd_result is not None:
+        return nvd_result
+
+    raise UnsupportedPlatform(
+        f"no provider claims {cve_id!r} (native + NVD both missed). "
+        f"Registered: {[p.name for p in providers()]}. "
+        f"Pass --platform <name> to force one."
+    )
+
+
+def select_provider(cve_id: str, *, override: str | None = None) -> PlatformProvider:
+    """Convenience wrapper: just the provider, discarding the chosen Platform."""
+    provider, _ = resolve_for_cve(cve_id, platform_override=override)
+    return provider
+
+
 __all__ = [
     "Platform",
+    "PlatformProvider",
     "UnknownPlatform",
     "UnsupportedPlatform",
+    "WindowsProvider",
     "WindowsVersionedPlatform",
-    "select_platform",
+    "LinuxProvider",
+    "LinuxDistroPlatform",
+    "providers",
+    "provider_by_name",
+    "select_provider",
+    "resolve_for_cve",
 ]

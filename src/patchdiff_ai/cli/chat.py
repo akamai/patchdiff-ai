@@ -133,9 +133,21 @@ async def post_run_repl(
                                 ctx.progress = progress
                                 if ctx.tools.idalib is not None:
                                     ctx.tools.idalib.attach_progress(progress)
+                                # Reuse the Platform that was resolved at
+                                # the start of this CLI invocation. It's
+                                # stashed on ctx.platform by run_cve's
+                                # entry; the orchestrator no longer
+                                # auto-detects, so we have to forward it
+                                # explicitly on the rerun.
+                                if ctx.platform is None:
+                                    raise RuntimeError(
+                                        "ctx.platform is unset — chat must be "
+                                        "entered after a successful run_cve()."
+                                    )
                                 new_state = await run_cve(
                                     ctx,
                                     cve,
+                                    platform=ctx.platform,
                                     interactive=interactive,
                                     evaluate=False,
                                     force=True,

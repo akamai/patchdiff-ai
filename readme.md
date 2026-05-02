@@ -87,12 +87,13 @@ not an LLM-driven supervisor.
               │
               ▼
    ┌──────────────────────┐
-   │         CLI          │   typer + .env loader; builds AppContext
-   └──────────┬───────────┘
-              │ AppContext (DI bundle)
+   │         CLI          │   click + .env loader; per-platform sub-groups
+   └──────────┬───────────┘   (windows / linux / ...); resolves CVE→Platform
+              │               via parallel native (MSRC/USN/...) + NVD fallback
+              │ AppContext (DI bundle) + resolved Platform
               ▼
    ┌──────────────────────┐
-   │     Orchestrator     │   selects Platform plugin, runs the
+   │     Orchestrator     │   stashes Platform on ctx, runs the
    │     run_cve(...)     │   pipeline, resumes on interrupt()
    └──────────┬───────────┘
               ▼
@@ -274,11 +275,20 @@ Useful flags:
 - `--eval` — run the report-generation step against multiple LLMs in parallel
   (useful for benchmarking or for picking the most confident output).
 - `--platform windows` — explicit platform-plugin override. Default is
-  auto-detect via each plugin's `matches()`. Windows is the only registered
-  platform today.
-- `--platform-ids 12390` — pin the MSRC product ID instead of inferring it
-  from the host OS. Orthogonal to `--platform`; only the Windows plugin
-  consumes it.
+  auto-detect: every registered provider's native advisory source
+  (Windows: MSRC; Linux: USN/DSA, when wired) is queried in parallel,
+  with NVD CPE matching as the fallback if all native checks miss.
+  Today: `windows` (real) and `linux` (skeleton) are registered.
+
+For Windows-specific knobs (pinning a specific MSRC product ID,
+running a Patch Tuesday cycle), use the `windows` sub-group:
+
+```powershell
+patchdiff-ai windows cve CVE-2025-29824 --platform-id 12390
+patchdiff-ai windows month 2025-Apr --platform-id 12390
+patchdiff-ai windows health-check
+patchdiff-ai windows install
+```
 
 ### Chat tools
 
@@ -427,11 +437,13 @@ The chat REPL also accepts the slash-style hardcoded commands listed in
 ### A whole Patch Tuesday
 
 ```powershell
-patchdiff-ai month 2025-Apr --platform-ids 12390
+patchdiff-ai windows month 2025-Apr --platform-id 12390
 ```
 
-Filters by `--platform-name` (substring match), `--platform-ids` (comma-separated MSRC
-product IDs), or both. Runs every matching CVE end-to-end, sequentially.
+The `month` command lives under the `windows` sub-group (Patch Tuesday
+is an MSRC concept). Filters by `--platform-id` (single MSRC product
+ID) and `--platform-name` (substring match). Runs every matching CVE
+end-to-end, sequentially.
 
 ### Cached reports
 

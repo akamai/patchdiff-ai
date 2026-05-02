@@ -57,12 +57,10 @@ class AppContext:
     vector_stores: VectorStores | None = None
     prompts: "PromptRegistry | None" = field(default=None)
     progress: ProgressReporter = field(default_factory=NullProgressReporter)
-    # Set by the orchestrator post-`select_platform`; nodes route per-OS
-    # work (advisory fetch, package gather, ranking prompts) through it.
+    # Set by the orchestrator at run_cve entry from the CLI-resolved
+    # provider/Platform; nodes route per-OS work (advisory fetch,
+    # package gather, ranking prompts) through it.
     platform: "Platform | None" = field(default=None)
-    # `--platform-ids` hint (name, productId); narrows the Windows
-    # plugin's MSRC product list, ignored elsewhere.
-    platform_ids_hint: tuple[str, int] | None = None
 
     @classmethod
     def build(cls, settings: Settings) -> "AppContext":

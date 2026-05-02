@@ -3,15 +3,39 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import typer
 
-from patchdiff_ai.cli.validators import cve_value, month_value, platform_ids
+from patchdiff_ai.cli.validators import cve_value
 from patchdiff_ai.config.settings import get_settings
 from patchdiff_ai.runtime.app_context import AppContext
 
 app = typer.Typer()
+
+
+_MONTH_RE = re.compile(
+    r"^\d{4}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$",
+    re.IGNORECASE,
+)
+
+
+def _month_value(value: str) -> str:
+    if not value:
+        return value
+    if not _MONTH_RE.match(value):
+        raise typer.BadParameter(
+            "Invalid month format; expected YYYY-MMM (e.g. 2025-Jul)"
+        )
+    year, mon = value.split("-")
+    return f"{year}-{mon.capitalize()}"
+
+
+def _platform_ids(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {x.strip() for x in value.split(",") if x.strip()}
 
 
 def _format_report_body(document: str) -> str:
@@ -52,7 +76,7 @@ def _save_reports(reports: dict, path: Path) -> None:
 @app.callback(invoke_without_command=True)
 def cached_command(
     cve: str = typer.Option("", "--cve", callback=lambda v: cve_value(v) if v else v),
-    month: str = typer.Option("", "--month", callback=lambda v: month_value(v) if v else v),
+    month: str = typer.Option("", "--month", callback=lambda v: _month_value(v) if v else v),
     platforms_csv: str = typer.Option("", "--platform-ids"),
 ) -> None:
     """Print or save reports already cached in the vector store."""
@@ -73,14 +97,14 @@ def cached_command(
         typer.echo(f"[+] Saved cached reports for {cve} -> {settings.paths.reports_dir}")
         return
 
-    from patchdiff_ai.patches.platform_filter import (
+    from patchdiff_ai.platforms.windows.cycle import (
         collect_cves,
         download_cvrf,
         pick_ids,
     )
 
     cvrf = download_cvrf(month)
-    targets, names = pick_ids(cvrf, None, platform_ids(platforms_csv))
+    targets, names = pick_ids(cvrf, None, _platform_ids(platforms_csv))
     cve_rows = collect_cves(cvrf, targets)
     os_name = "".join(x.replace(" ", "_") for x in (names or []))
     os_id = "".join(str(x) for x in (targets or []))

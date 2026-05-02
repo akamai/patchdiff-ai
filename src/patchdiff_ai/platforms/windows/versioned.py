@@ -1,19 +1,13 @@
-"""Per-Windows-version platform plugin, parameterised by `PlatformSpec`.
+"""Per-Windows-version `Platform` plugin, parameterised by `PlatformSpec`.
 
-Replaces the monolithic `WindowsPlatform` (which read baselines off the
-host's `C:\\Windows\\WinSxS`). Every concrete Windows release/SKU the
-project ships an archive for becomes one instance of this class, loaded
-from `resources/windows_sxs/platforms.json` at startup.
+Every Windows release/SKU we ship a WinSxS archive for becomes one
+instance, loaded from `resources/windows_sxs/platforms.json`. The
+provider (`platforms.windows.provider`) owns the catalog and resolves a
+CVE / `--platform-id` to one of these instances per run.
 
-The pipeline-facing seams (`enrich_cve`, `gather_packages`,
-`candidate_prompts`, `candidate_metadata`) are unchanged from the legacy
-`WindowsPlatform`. The two new things:
-
-  * `matches(cve)` is no longer "any CVE-…": each instance only claims
-    a CVE when MSRC's affected products include this archive's
-    `msrc_product_ids`.
-  * `get_winsxs_df()` and `extract_baselines(rows)` come from the
-    archive helper, not the host filesystem.
+Pipeline-facing seams (`enrich_cve`, `gather_packages`,
+`candidate_prompts`, `candidate_metadata`) are unchanged from the
+legacy monolithic `WindowsPlatform`.
 """
 
 from __future__ import annotations
@@ -46,31 +40,10 @@ class WindowsVersionedPlatform(Platform):
         # The compiled gather subgraph is built lazily on first use so we
         # don't pay the cost on cache-short-circuited runs.
         self._gather_graph: Any = None
-        # Cache the MSRC report fetch within a single run — `matches` and
-        # `enrich_cve` both pull it. Keyed by CVE id; one entry expected.
+        # Memoised MSRC report per CVE id.
         self._msrc_cache: dict[str, Any] = {}
 
     # ----- Platform protocol ------------------------------------------------
-
-    def matches(self, cve_id: str) -> bool:
-        """True if MSRC lists any of this platform's product IDs as affected.
-
-        This *does* hit the network on auto-detect, but the result is
-        memoised so subsequent calls (e.g. `enrich_cve`) reuse it. Only
-        a well-formed CVE id is checked; everything else returns False.
-        """
-        if not cve_id.upper().startswith("CVE-"):
-            return False
-        try:
-            metadata = self._fetch_msrc(cve_id)
-        except Exception as exc:
-            # Network / API failure: don't claim the CVE. select_platform
-            # will try the next plugin or raise UnsupportedPlatform.
-            log.debug("matches_msrc_fetch_failed",
-                      platform=self.name, cve=cve_id, error=str(exc))
-            return False
-        wanted = set(self.spec.msrc_product_ids)
-        return any(p.get("productId") in wanted for p in metadata.products)
 
     async def enrich_cve(
         self, state: "PipelineState", ctx: "AppContext"
@@ -83,8 +56,6 @@ class WindowsVersionedPlatform(Platform):
             metadata = self._fetch_msrc(state.cve_details.cve)
 
         wanted = set(self.spec.msrc_product_ids)
-        # Prefer the primary product id; fall back to the first matching
-        # product in the MSRC report.
         product = next(
             (p for p in metadata.products if p.get("productId") == self.spec.primary_product_id),
             None,
@@ -98,9 +69,6 @@ class WindowsVersionedPlatform(Platform):
                 f"product_ids={sorted(wanted)} for {state.cve_details.cve}"
             )
 
-        # Use the resolved product's name + id as the os identity. Arch
-        # comes from the host (used for filtering the WinSxS DataFrame),
-        # NOT from the archive — the archive can carry multiple arches.
         name = product.get("product") or self.spec.slug
         pid = product.get("productId") or self.spec.primary_product_id
         arch = processor_arch_tokens(
@@ -167,32 +135,14 @@ class WindowsVersionedPlatform(Platform):
     # ----- Archive access (consumed by gather_info / delta_apply) -----------
 
     def get_winsxs_df(self) -> pl.DataFrame:
-        """Return the DataFrame indexing this archive's contents. Loaded
-        lazily and cached for the life of the plugin instance."""
         return self._archive.get_dataframe()
 
     def extract_baselines(self, rows: list[dict]) -> AsyncContextManager[Path]:
-        """Async context manager yielding a tmp dir with extracted baselines.
-
-        Caller pattern:
-
-            async with platform.extract_baselines(rows) as tmp:
-                for row in rows:
-                    real = tmp / row["path"]
-                    ...
-
-        The tmp dir is auto-deleted on context exit. The `db/patch_store/`
-        cache is the durable store — one extraction per `(file, base_kb)`
-        per project lifetime, then the patch_store check at
-        `delta_apply.py:48` skips the entire path on re-runs.
-        """
         return self._archive.extract_baselines(rows)
 
     # ----- Internal helpers --------------------------------------------------
 
     def _fetch_msrc(self, cve_id: str):
-        """Memoised MSRC report fetch. Local import to keep `cve_enrichment`
-        out of the import path for plugins that never touch MSRC."""
         from patchdiff_ai.patches.cve_enrichment import report
         if cve_id not in self._msrc_cache:
             self._msrc_cache[cve_id] = report(cve_id)

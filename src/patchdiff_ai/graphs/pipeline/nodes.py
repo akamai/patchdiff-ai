@@ -26,7 +26,7 @@ def make_cve_info_node(ctx: AppContext):
         # does this). Defensive check so misuse fails fast and loud.
         if ctx.platform is None:
             raise RuntimeError(
-                "ctx.platform is not set; orchestrator must call select_platform "
+                "ctx.platform is not set; the CLI must resolve a Platform "
                 "before invoking the pipeline graph"
             )
 

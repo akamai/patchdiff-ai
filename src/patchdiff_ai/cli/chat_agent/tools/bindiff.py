@@ -46,6 +46,7 @@ def register(cat: ToolCatalogue, artifacts: list[Any]) -> None:
         "asking about matches if you're not sure which file is available.",
         {"type": "object", "properties": {}, "required": []},
         bindiff_list_pairs,
+        tags=["reverse engineering", "binary"],
     )
 
     def bindiff_stats(file: str) -> Any:
@@ -69,6 +70,7 @@ def register(cat: ToolCatalogue, artifacts: list[Any]) -> None:
             "required": ["file"],
         },
         bindiff_stats,
+        tags=["reverse engineering", "binary"],
     )
 
     def bindiff_function_matches(
@@ -123,6 +125,7 @@ def register(cat: ToolCatalogue, artifacts: list[Any]) -> None:
             "required": ["file"],
         },
         bindiff_function_matches,
+        tags=["reverse engineering", "binary"],
     )
 
     def bindiff_unmatched(
@@ -163,6 +166,7 @@ def register(cat: ToolCatalogue, artifacts: list[Any]) -> None:
             "required": ["file"],
         },
         bindiff_unmatched,
+        tags=["reverse engineering", "binary"],
     )
 
     def bindiff_basic_blocks(file: str, function_address: str) -> Any:
@@ -193,4 +197,5 @@ def register(cat: ToolCatalogue, artifacts: list[Any]) -> None:
             "required": ["file", "function_address"],
         },
         bindiff_basic_blocks,
+        tags=["reverse engineering", "binary"],
     )

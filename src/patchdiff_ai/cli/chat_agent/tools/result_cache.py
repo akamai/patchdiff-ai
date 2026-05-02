@@ -61,4 +61,5 @@ def register(cat: ToolCatalogue) -> None:
             "required": ["result_id"],
         },
         read_result,
+        tags=["meta", "pagination"],
     )

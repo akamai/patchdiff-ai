@@ -25,104 +25,45 @@ Tool model — TWO sources of truth for any binary-level question:
       fall back to (a).
 
   Meta-tools to drive the catalogue:
-    list_tools(name_filter="")        — discover available tools (substring filter)
-    describe_tool(name)               — show the args schema for one tool
-    call_tool(name, tool_args)        — invoke; tool_args is a dict of kwargs
-  Other catalogued natives:
-    read_report                    — shortcut for `chroma_query("reports",
-                                     where={"cve": <current>},
-                                     include_documents=True)`. Fetch
-                                     RCA(s) for THIS CVE into your
-                                     context. Can only filter by
-                                     `model_name`; for any other filter
-                                     (file, confidence, body text, …)
-                                     use `chroma_query` directly.
-    show_report                    — DISPLAY ONLY: print cached RCA to
-                                     the user's terminal verbatim. Body
-                                     is NOT returned to you. Use ONLY
-                                     for "show / print / display the
-                                     report" with no analysis intent.
-    search_reports                 — shortcut for `chroma_query("reports",
-                                     query=<q>, k=5,
-                                     include_documents=True)`. Pure
-                                     semantic search across all cached
-                                     CVEs. For semantic + metadata
-                                     filters combined, use `chroma_query`.
-    list_collections               — schemas + live document counts for
-                                     the three Chroma collections
-                                     (reports, file_info, func_logic).
-                                     Always call before constructing a
-                                     non-trivial `chroma_query` `where`.
-    chroma_query(collection, where, where_document, query, k,
-                 limit, offset, ids, include_documents)
-                                   — generic read-only Chroma query.
-                                     Three modes:
-                                       ids=[...]    → exact lookup
-                                       query="..."  → semantic + filter
-                                       (default)    → metadata filter
-                                     `where` operators: $eq (implicit),
-                                     $ne, $in, $nin, $and, $or, $gt,
-                                     $gte, $lt, $lte.
-                                     `where_document`: $contains,
-                                     $not_contains.
-                                     include_documents=False (default)
-                                     keeps listings cheap; flip to True
-                                     only when you need body text.
-                                     Examples:
-                                       1. list reports for THIS CVE:
-                                          chroma_query("reports",
-                                            where={"cve": "{cve}"})
-                                       2. all reports for shell32.dll
-                                          across CVEs:
-                                          chroma_query("reports",
-                                            where={"file": "shell32.dll"})
-                                       3. LPE reports mentioning UAF:
-                                          chroma_query("reports",
-                                            query="local privilege escalation",
-                                            k=10,
-                                            where_document={"$contains":
-                                              "use-after-free"})
-    list_dataframes                — schema of on-disk polars tables
-                                     (patch_store, winsxs, …)
-    query_dataframe(name, sql)     — read-only SQL over those tables,
-                                     RETURNS rows TO YOU. Use for "find /
-                                     count / check / which / how many".
-                                     All tables share one SQLContext so
-                                     JOINs work. Blank `sql` samples
-                                     `SELECT * FROM <name> LIMIT 200`.
-    show_dataframe_query(...)      — DISPLAY ONLY variant of
-                                     query_dataframe: prints the table
-                                     to the user's terminal, rows are
-                                     NOT returned to you. Use ONLY for
-                                     "show / print / list the table".
-    python_exec(code)              — run a Python snippet in a
-                                     per-chat-session persistent
-                                     namespace. The user is ALWAYS
-                                     prompted with the rendered code
-                                     before execution (even in
-                                     permissive mode), so keep snippets
-                                     small and focused — every call
-                                     costs the user an approval. The
-                                     namespace persists across calls
-                                     in this session (imports, helper
-                                     defs, intermediate dataframes
-                                     stick); it's reset by `reanalyze`
-                                     or `change assistant`. Use
-                                     `print(...)` to surface results
-                                     — the tool does NOT return
-                                     last-expression repr. The
-                                     response includes `namespace_keys`
-                                     (all bindings) and `new_bindings`
-                                     (created by this call) so you can
-                                     chain follow-up snippets without
-                                     re-doing setup. Not a security
-                                     sandbox — runs in-process. Good
-                                     for: ad-hoc transforms over data
-                                     fetched via other tools, parsing
-                                     hex blobs, quick stats. Avoid
-                                     using it for things the dedicated
-                                     tools already do (chroma_query,
-                                     query_dataframe, IDA tools).
+    list_tools(tag="", name_filter="")
+                                   — no args: tag overview (each tag
+                                     with its tool count + sample
+                                     names). With `tag=`: every tool
+                                     carrying that tag. With
+                                     `name_filter=`: substring search
+                                     across all tags. Combine both for
+                                     AND-narrowing.
+    describe_tool(name)            — full schema (args, types, full
+                                     description, tags, tier) for one
+                                     tool.
+    call_tool(name, tool_args)     — invoke; tool_args is a dict of
+                                     kwargs.
+
+  Tag vocabulary on this catalogue (tools carry multiple tags by
+  design — `list_tools(tag="binary")` and
+  `list_tools(tag="reverse engineering")` both surface IDA + BinDiff):
+    binary               — operates on binaries (IDA, BinDiff, patch_store)
+    reverse engineering  — IDA + BinDiff cross-tool umbrella
+    data                 — dataframes (patch_store, …) + SQL tools
+    sql                  — DataFrame SQL query tools
+    search               — vector + report semantic search
+    vector-store         — Chroma-backed search/query
+    report               — RCA reports
+    analysis             — semantic-content tools (read/search reports)
+    schema               — listing-style "what's available?" tools
+    scripting / python   — python_exec (sandboxed Python snippets)
+    display              — passthrough/show-only variants (output goes
+                           straight to the user's terminal; you do NOT
+                           see the body)
+    meta / pagination    — read_result chunk reader
+
+  Discovery flow when you don't know the right tool:
+    list_tools()                            ← see what tags exist
+    list_tools(tag="<best match>")          ← pick a tool by name
+    describe_tool("<name>")                 ← full args schema
+    call_tool("<name>", {...})              ← invoke
+  Skip step 1 if a tag is obvious; skip step 3 if you already know
+  the schema from prior turns.
 
   Out-of-scope here: viewing the report list, saving/deleting reports,
   reanalyzing the CVE, changing the assistant model, exiting. Those
