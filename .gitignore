@@ -1,13 +1,15 @@
-db*/
-.venv/
-venv/
-.idea/
-**/_temp/
-patch_store/
-**/.os
-**/*.bin
-log*.txt
-logs/
-__pycache__/
-poc/
 .env
+_temp/
+.venv/
+.claude/
+**/__pycache__/**
+
+
+# temp
+patchdiff-ai-wip-models_config
+.plan
+db/
+
+logs/
+
+resources/windows_sxs/
