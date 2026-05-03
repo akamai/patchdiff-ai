@@ -21,8 +21,12 @@ from patchdiff_ai.platforms import providers
 
 @click.group(
     name="patchdiff-ai",
-    help="patchdiff-ai — security-update RCA across platforms.",
+    help="patchdiff-ai — security-update RCA across platforms.\n\n"
+         "Bare `patchdiff-ai` (or `patchdiff-ai --chat[-permissive]`) drops "
+         "into the REPL with no CVE bound — useful for browsing cached "
+         "reports, querying Chroma, or driving the IDA tools directly.",
     context_settings={"help_option_names": ["-h", "--help"]},
+    invoke_without_command=True,
 )
 @click.option(
     "-L",
@@ -31,13 +35,42 @@ from patchdiff_ai.platforms import providers
     help="Verbosity: trace, debug, info, warning, error. "
     "At trace/debug, full crash tracebacks are written to the log file.",
 )
+@click.option(
+    "--chat",
+    "chat_flag",
+    is_flag=True,
+    default=False,
+    help="Force-enter the REPL with no CVE bound (also the default when "
+         "no subcommand is given). Ignored when a subcommand is invoked.",
+)
+@click.option(
+    "--chat-permissive",
+    "chat_permissive_flag",
+    is_flag=True,
+    default=False,
+    help="Like --chat but skips the y/N tool-approval gate. "
+         "Ignored when a subcommand is invoked.",
+)
 @click.pass_context
-def root(ctx: click.Context, log_level: str | None) -> None:
+def root(
+    ctx: click.Context,
+    log_level: str | None,
+    chat_flag: bool,
+    chat_permissive_flag: bool,
+) -> None:
     settings = get_settings()
     effective_level = log_level if log_level is not None else settings.log_level
     configure_logging(level=effective_level, logs_dir=settings.paths.logs_dir)
     ctx.ensure_object(dict)
     ctx.obj["log_level"] = effective_level
+
+    # Bare invocation → CVE-less chat. The flags are accepted purely as
+    # explicit/documented forms; they have no effect when paired with a
+    # subcommand (each subcommand owns its own chat options).
+    if ctx.invoked_subcommand is None:
+        from patchdiff_ai.cli.runner import run_chat_only
+
+        run_chat_only(permissive=chat_permissive_flag)
 
 
 def build_root() -> click.Group:
