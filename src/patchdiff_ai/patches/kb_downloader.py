@@ -32,6 +32,24 @@ SEARCH_URL = "https://www.catalog.update.microsoft.com/Search.aspx?q={}"
 DL_URL = "https://catalog.update.microsoft.com/DownloadDialog.aspx"
 UID_PAT = re.compile(r"goToDetails\(['\"]([0-9a-f\-]{36})['\"]\)")
 
+# Process-wide bandwidth cap shared by all CVEs in a batch. Lazy-init on
+# first use because the configured value is read from `AppContext.settings`
+# which isn't available at import time. asyncio.Semaphore (3.10+) is loop-
+# agnostic until first __aenter__, so a module-level holder is safe.
+_DOWNLOAD_SEM: asyncio.Semaphore | None = None
+_DOWNLOAD_SEM_LOCK = asyncio.Lock()
+
+
+async def _download_semaphore(ctx: "AppContext") -> asyncio.Semaphore:
+    global _DOWNLOAD_SEM
+    if _DOWNLOAD_SEM is None:
+        async with _DOWNLOAD_SEM_LOCK:
+            if _DOWNLOAD_SEM is None:
+                n = max(1, ctx.settings.concurrency.kb_downloads)
+                _DOWNLOAD_SEM = asyncio.Semaphore(n)
+                log.info("kb_download_semaphore_init", limit=n)
+    return _DOWNLOAD_SEM
+
 
 class _DownloadCancelled(Exception):
     """Raised inside the streaming thread when the asyncio side cancels."""
@@ -138,18 +156,25 @@ async def _grab(
         cancel = threading.Event()
         loop = asyncio.get_running_loop()
 
-        log.info("kb_download_start", name=name)
-        fut = loop.run_in_executor(
-            None, _stream_to_disk, session, url, dest, cancel, handle
-        )
-        try:
-            await fut
-        except asyncio.CancelledError:
-            cancel.set()
-            log.info("kb_download_cancelled", name=name)
-            raise
-        finally:
-            handle.complete()
+        # Bandwidth cap: gate the actual byte-streaming so a 12-CVE batch
+        # spanning many Windows versions doesn't open 12 multi-GB streams
+        # at once. Acquired here (inside the per-path lock) so same-KB
+        # CVEs never reach this — they short-circuit on the cache check
+        # above.
+        sem = await _download_semaphore(ctx)
+        async with sem:
+            log.info("kb_download_start", name=name)
+            fut = loop.run_in_executor(
+                None, _stream_to_disk, session, url, dest, cancel, handle
+            )
+            try:
+                await fut
+            except asyncio.CancelledError:
+                cancel.set()
+                log.info("kb_download_cancelled", name=name)
+                raise
+            finally:
+                handle.complete()
 
     log.info("kb_download_done", name=name, mb=dest.stat().st_size // 1_048_576)
     return dest

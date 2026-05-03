@@ -33,6 +33,29 @@ from patchdiff_ai.runtime.paths import BUNDLED_BINDIFF_DIR
 
 
 _PLUGIN_FILES = ("bindiff8_ida64.dll", "binexport12_ida64.dll")
+# Version the bundled plugin DLLs were built against. Copying them into a
+# different IDA's `plugins/` won't load (BinExport pins the SDK ABI per IDA
+# minor version), so we refuse and tell the user instead of silently
+# installing a non-functional plugin.
+BUNDLED_PLUGIN_IDA_VERSION = (9, 3)
+
+
+def is_admin() -> bool:
+    """Best-effort check for elevated privileges on Windows.
+
+    Returns True on non-Windows (irrelevant there) and on any failure to
+    query the OS — the worst case is a missing warning, never a false
+    abort. Writing into `C:\\Program Files\\IDA *` requires elevation, so
+    callers use this to print a hint before letting `shutil.copy2` or
+    `pip install` fail with a permission error.
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return True
 
 
 def _resolve_target(ida_root: Path | None) -> IdaInstall:
@@ -46,7 +69,8 @@ def _resolve_target(ida_root: Path | None) -> IdaInstall:
     inst = select_ida_install(discover_ida_installs())
     if inst is None:
         raise click.BadParameter(
-            "No IDA install found. Pass --ida-root or set TOOLS__IDA in .env."
+            "No IDA install found. Pass --ida-root, set tools.ida in config.json, "
+            "or set TOOLS__IDA env var."
         )
     return inst
 
@@ -75,18 +99,17 @@ def install_group(ctx: click.Context) -> None:
                "`install ida-plugins` if you also need IDA assets)")
 
 
-@install_group.command("idalib", help="Install `idapro` (idalib's Python wrapper) from IDA's bundled wheel.")
-@click.option(
-    "--ida-root",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None,
-    help="Target IDA install root. Defaults to the newest discovered install.",
-)
-def install_idalib(ida_root: Path | None) -> None:
-    inst = _resolve_target(ida_root)
+def do_install_idalib(inst: IdaInstall) -> None:
+    """Install `idapro` from `<ida_root>/idalib/python/` and run the activator.
+
+    Caller is responsible for picking `inst` (typically the newest 9.0+
+    install). Raises `click.BadParameter` if `inst` doesn't ship idalib
+    or `click.exceptions.Exit` if pip / the activator return non-zero.
+    """
     if not inst.has_idalib:
         raise click.BadParameter(
-            f"{inst.root} doesn't ship idalib (need IDA 9.0+). Use --ida-root to pick a 9.x install."
+            f"{inst.root} doesn't ship idalib (need IDA 9.0+). "
+            "Use --ida-root to pick a 9.x install."
         )
     py_dir = inst.idalib_python_dir
     assert py_dir is not None  # has_idalib gates this
@@ -124,15 +147,14 @@ def install_idalib(ida_root: Path | None) -> None:
     click.echo("[+] idalib install complete.")
 
 
-@install_group.command("ida-plugins", help="Copy bundled BinDiff/BinExport DLLs into IDA's plugins folder.")
-@click.option(
-    "--ida-root",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None,
-    help="Target IDA install root. Defaults to the newest discovered install.",
-)
-def install_ida_plugins(ida_root: Path | None) -> None:
-    inst = _resolve_target(ida_root)
+def do_install_ida_plugins(inst: IdaInstall) -> None:
+    """Copy bundled BinDiff/BinExport DLLs into `inst`'s `plugins/` folder.
+
+    Only safe for IDA 9.3 — the bundled DLLs in
+    `resources/bindiff_ida_9.3/` link against that minor version's SDK.
+    Caller checks `inst.version == BUNDLED_PLUGIN_IDA_VERSION` and skips
+    otherwise. Idempotent: skips files whose contents already match.
+    """
     if not BUNDLED_BINDIFF_DIR.is_dir():
         raise click.BadParameter(f"Bundled plugin folder missing: {BUNDLED_BINDIFF_DIR}")
     plugins_dir = inst.plugins_dir
@@ -158,6 +180,30 @@ def install_ida_plugins(ida_root: Path | None) -> None:
     for name in skipped:
         click.echo(f"  = {name} (already up-to-date)")
     click.echo("[+] ida-plugins install complete.")
+
+
+@install_group.command("idalib", help="Install `idapro` (idalib's Python wrapper) from IDA's bundled wheel.")
+@click.option(
+    "--ida-root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Target IDA install root. Defaults to the newest discovered install.",
+)
+def install_idalib(ida_root: Path | None) -> None:
+    inst = _resolve_target(ida_root)
+    do_install_idalib(inst)
+
+
+@install_group.command("ida-plugins", help="Copy bundled BinDiff/BinExport DLLs into IDA's plugins folder.")
+@click.option(
+    "--ida-root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Target IDA install root. Defaults to the newest discovered install.",
+)
+def install_ida_plugins(ida_root: Path | None) -> None:
+    inst = _resolve_target(ida_root)
+    do_install_ida_plugins(inst)
 
 
 def _hash(path: Path) -> str:

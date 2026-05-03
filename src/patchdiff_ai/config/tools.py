@@ -7,6 +7,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from patchdiff_ai.runtime.paths import BUNDLED_UPDATE_COMPRESSION_DLL
+
 
 @dataclass(frozen=True)
 class IdaInstall:
@@ -165,7 +167,7 @@ class ToolPaths(BaseModel):
     # (newest wins). Explicit `TOOLS__IDA=...` still wins.
     ida: Path | None = Field(default=None)
     update_compression_dll: Path = Field(
-        default=Path(__file__).resolve().parents[1] / "tools" / "_native" / "UpdateCompression.dll"
+        default_factory=lambda: BUNDLED_UPDATE_COMPRESSION_DLL
     )
 
     process_timeout_seconds: float = 60 * 30

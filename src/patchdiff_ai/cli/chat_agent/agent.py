@@ -32,11 +32,18 @@ def _load_system_prompt(ctx: AppContext, cve: str) -> str:
     """Load the chat system prompt with `{cve}` substituted.
 
     `str.replace` (not `.format`) so the markdown can carry literal
-    JSON snippets without `{{ }}` escaping.
+    JSON snippets without `{{ }}` escaping. An empty `cve` (CVE-less
+    chat entered via bare `patchdiff-ai`) substitutes a placeholder so
+    the model knows it's in standalone-browse mode rather than thinking
+    it's bound to an empty-string CVE.
     """
     if ctx.prompts is None:
         raise RuntimeError("AppContext.prompts is not configured")
-    return ctx.prompts.get(PromptId.CHAT_SYSTEM).replace("{cve}", cve)
+    label = cve if cve else (
+        "(no CVE bound — standalone browse mode; cross-CVE tools like "
+        "search_reports / chroma_query / patch-store / IDA are available)"
+    )
+    return ctx.prompts.get(PromptId.CHAT_SYSTEM).replace("{cve}", label)
 
 
 def _make_agent_tools(catalogue: ToolCatalogue, artifacts: list[Any]):

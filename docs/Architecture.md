@@ -228,9 +228,14 @@ Built on **pydantic-settings**. The root model is `Settings` in
 [`config/settings.py`](../src/patchdiff_ai/config/settings.py). It composes:
 
 - `AzureCreds`, `AnthropicCreds`, `GeminiCreds` — provider credentials.
-- `Paths` — filesystem layout (`db_dir`, `reports_dir`, `temp_dir`, `logs_dir`,
-  derived properties for the patch-store index, winsxs cache, OS cache, and eval
-  CVE cache).
+- `Paths` — filesystem layout. A single `data_root` (defaulting to
+  `%APPDATA%/patchdiff-ai` on Windows or `~/.local/share/patchdiff-ai`
+  elsewhere — see [`runtime/app_dirs.py`](../src/patchdiff_ai/runtime/app_dirs.py))
+  anchors `db_dir`, `reports_dir`, `temp_dir`, `logs_dir`, `patch_store_dir`,
+  and `windows_sxs_dir`. A `model_validator(mode="before")` fills any path
+  left as `null` in config.json with its `data_root`-relative default, so
+  users only override the paths they care about. Override `data_root` itself
+  via the `PATCHDIFF_AI_HOME` env var.
 - `ToolPaths` — executable paths and a global `process_timeout_seconds` (default
   30 minutes; IDA/BinDiff jobs can be long).
 - `Thresholds` — three knobs:
@@ -243,14 +248,22 @@ Built on **pydantic-settings**. The root model is `Settings` in
 - `ModelChoices` — per-purpose model name overrides. Each field uses a single-
   underscore alias (`MODELS_DEFAULT`, `MODELS_GATHER_INFO`, …) — *not* the
   nested `MODELS__<field>` form. This is a deliberate exception to the
-  general nesting rule so model overrides remain flat in `.env`.
+  general nesting rule so model overrides remain flat in env vars.
 
-Settings are read from `.env` + process env. Nested fields use the `__` delimiter
+Settings are read from **`<data_root>/config.json`** + process env.
+`Settings.settings_customise_sources` wires a `_BlankStrippedJsonSource`
+(strips `null` placeholders so they fall through to the next source)
+between `init_settings` / `env_settings` and the model defaults. The
+auto-create hook in `AppContext.build()` writes a starter `config.json`
+on first run; users can also bootstrap explicitly via `patchdiff-ai init`.
+
+Precedence (highest first): explicit kwargs → env vars → `config.json` →
+defaults. Nested env fields use the `__` delimiter
 (`PATHS__DB_DIR=/data/db`, `TOOLS__SEVEN_ZIP=...`, `CONCURRENCY__RE_WORKERS=...`).
 Legacy flat names (`AZURE_ENDPOINT`, `ANTHROPIC_API_KEY`) and the per-purpose
 model overrides are honored via `Field(alias=...)`.
 
-`get_settings()` is `lru_cache`d so `.env` is read once per process.
+`get_settings()` is `lru_cache`d so `config.json` is read once per process.
 
 ### 3. AppContext (dependency injection) ([`src/patchdiff_ai/runtime/app_context.py`](../src/patchdiff_ai/runtime/app_context.py))
 
@@ -925,28 +938,35 @@ force a full re-run.
 ## On-disk layout
 
 ```
-<repo or working dir>/
-├── db/                                  # Chroma + patch-store
-│   ├── chroma.sqlite3                   # Chroma index
-│   ├── <collection-uuid>/...            # Chroma per-collection storage
-│   ├── .patch_store_df                  # Polars-serialized PatchStoreEntry index
-│   ├── winsxs.bin                       # cached winsxs DataFrame
-│   ├── .os                              # JSON cache (OS detection)
-│   └── patch_store/                     # extracted / patched binaries by uid
-├── _temp/                               # downloaded .msu + extracted_<archive>/...
-│   ├── windows*.msu                     # downloaded KBs
-│   └── extracted_windows*.msu/          # 7-Zip + PSF + delta output
-│       ├── report.txt                   # list of executables
-│       ├── report.cache                 # Polars-cached update DataFrame
-│       └── ...                          # nested cabs, manifests, executables
-├── reports/                             # plain-text reports
+%APPDATA%/patchdiff-ai/                  # data_root (override with PATCHDIFF_AI_HOME)
+├── config.json                           # all settings; env vars override
+├── db/                                   # Chroma + patch-store
+│   ├── chroma.sqlite3                    # Chroma index
+│   ├── <collection-uuid>/...             # Chroma per-collection storage
+│   ├── .patch_store_df                   # Polars-serialized PatchStoreEntry index
+│   ├── winsxs.bin                        # cached winsxs DataFrame
+│   ├── .os                               # JSON cache (OS detection)
+│   └── patch_store/                      # extracted / patched binaries by uid
+├── _temp/                                # downloaded .msu + extracted_<archive>/...
+│   ├── windows*.msu                      # downloaded KBs
+│   └── extracted_windows*.msu/           # 7-Zip + PSF + delta output
+│       ├── report.txt                    # list of executables
+│       ├── report.cache                  # Polars-cached update DataFrame
+│       └── ...                           # nested cabs, manifests, executables
+├── reports/                              # plain-text reports
 │   └── <CVE>_<file>.txt
-└── logs/                                # per-run JSON logs
-    └── <unix>.<uuid>.log
+├── logs/                                 # per-run JSON logs
+│   └── <unix>.<uuid>.log
+└── windows_sxs/                          # per-platform WinSxS archives + manifest
+    ├── platforms.json
+    ├── <product_id>.<slug>.bin
+    └── <product_id>.<slug>.7z
 ```
 
-Paths are configurable via `PATHS__<FIELD>` env vars. Defaults mirror the legacy
-implicit layout.
+Paths are configurable in `config.json` (`paths.db_dir`, ...) or via
+`PATHS__<FIELD>` env vars (env always wins). Each path defaults to a
+`data_root`-relative location when unset, so users only override what
+they need (e.g. point `db_dir` at a fast SSD).
 
 Each binary in the patch store gets its own decompilation directory:
 
@@ -1096,7 +1116,7 @@ helpers).
 
 ### Switch an existing node to a different model
 
-Set `MODELS_<PURPOSE>=<catalog-name>` in `.env`, or pass a `--model` flag through
+Set `models.<purpose>` in `config.json` (or `MODELS_<PURPOSE>=<catalog-name>` in env), or pass a `--model` flag through
 the CLI command and into the run config; nodes call
 `ctx.registry.for_purpose(ModelPurpose.<X>)`, so the override is honored as long as
 the model exists in the catalog and its provider has credentials.

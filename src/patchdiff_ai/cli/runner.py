@@ -8,18 +8,55 @@ Batch commands (e.g. `windows month`) call `run_batch_cves` so AppContext
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 from typing import TYPE_CHECKING, Iterable
 
 import click
+import structlog
 
-from patchdiff_ai.config.settings import get_settings
+from patchdiff_ai.config.settings import Settings, get_settings
 from patchdiff_ai.observability.progress import make_reporter
 from patchdiff_ai.runtime.app_context import AppContext
+from patchdiff_ai.runtime.app_dirs import config_json_path
 from patchdiff_ai.runtime.cancel import run_cancellable
 from patchdiff_ai.runtime.orchestrator import run_cve
 
 if TYPE_CHECKING:
     from patchdiff_ai.platforms.base import Platform
+
+log = structlog.get_logger(__name__)
+
+
+def _ensure_llm_configured(settings: Settings) -> None:
+    """Exit with a friendly hint when no LLM provider has credentials.
+
+    Without one of (Azure endpoint, Anthropic key, Gemini key) every
+    `for_purpose()` call fails with `ProviderUnavailableError` deep
+    inside the pipeline / chat. Catching it at the CLI boundary lets us
+    point users at `config.json` instead of dumping a stack trace —
+    especially relevant on first run, where the auto-created template is
+    blank and the user hasn't yet been told where it lives.
+    """
+    azure_set = bool(settings.azure.endpoint)
+    anthropic_set = settings.anthropic.api_key is not None
+    gemini_set = settings.gemini.api_key is not None
+    if azure_set or anthropic_set or gemini_set:
+        return
+
+    cfg = config_json_path()
+    click.echo(
+        "[!] No LLM provider configured. patchdiff-ai needs at least one of:\n"
+        "      Azure OpenAI  — set `azure.endpoint` (+ optional service-principal\n"
+        "                       creds, or `az login` for DefaultAzureCredential)\n"
+        "      Anthropic     — set `anthropic.api_key`\n"
+        "      Google Gemini — set `gemini.api_key`\n"
+        f"\n    Edit {cfg}\n"
+        "    or export the equivalent env vars (AZURE_ENDPOINT, "
+        "ANTHROPIC_API_KEY, GOOGLE_API_KEY).",
+        err=True,
+    )
+    raise click.exceptions.Exit(code=2)
 
 
 async def _run_one_cve_in_ctx(
@@ -50,6 +87,35 @@ async def _run_one_cve_in_ctx(
     )
 
 
+def run_chat_only(*, permissive: bool = False) -> None:
+    """Drop straight into the REPL without a prior CVE run.
+
+    Builds an `AppContext` (so the chat agent has access to the model
+    registry, vector stores, and `ida_chat` worker), then calls
+    `run_chat` with `cve=""` / `state=None`. The reanalyze REPL command
+    no-ops in this mode (it requires a bound CVE + platform); cross-CVE
+    tools (`search_reports`, `chroma_query`, IDA, patch-store) all work.
+    """
+    settings = get_settings()
+    settings.paths.ensure()
+    app_ctx = AppContext.build(settings)
+    # Check after `build()` so the auto-created config.json exists at
+    # the path the hint prints.
+    _ensure_llm_configured(settings)
+    try:
+        from patchdiff_ai.cli.chat import run_chat
+
+        run_chat(
+            app_ctx,
+            cve="",
+            state=None,
+            interactive=False,
+            permissive=permissive,
+        )
+    finally:
+        app_ctx.close()
+
+
 def run_single_cve(
     ctx: click.Context,
     *,
@@ -68,6 +134,7 @@ def run_single_cve(
     settings = get_settings()
     settings.paths.ensure()
     app_ctx = AppContext.build(settings)
+    _ensure_llm_configured(settings)
 
     try:
         with make_reporter() as progress:
@@ -103,12 +170,20 @@ def run_batch_cves(
     cves: Iterable[tuple[str, "Platform"]],
     eval_mode: bool = False,
 ) -> None:
-    """Run many CVEs back-to-back inside a single AppContext.
+    """Run many CVEs in parallel inside a single AppContext.
 
     `cves` is an iterable of `(cve_id, platform)` pairs — the caller does
     its own per-CVE platform resolution (e.g. `provider.matches_native`)
     before calling this. Skips chat / interrupt by design — batch runs
     should be unattended.
+
+    Concurrency is bounded by `settings.concurrency.cve_workers`
+    (env: `CONCURRENCY__CVE_WORKERS=N`). Each task runs against a
+    shallow `AppContext` clone so per-CVE `ctx.platform` mutation in the
+    orchestrator doesn't race across tasks; the heavy state (idalib
+    pool, registry, vector stores, progress reporter) is shared by
+    reference. One CVE failing logs and is recorded but does not abort
+    the batch.
 
     Ctrl-C cancels the *whole* batch; nothing about the partial work
     completed before the cancel is rolled back (cached reports stay in
@@ -118,18 +193,50 @@ def run_batch_cves(
     settings = get_settings()
     settings.paths.ensure()
     app_ctx = AppContext.build(settings)
+    _ensure_llm_configured(settings)
+    n_workers = max(1, settings.concurrency.cve_workers)
 
     async def _run_all() -> None:
+        sem = asyncio.Semaphore(n_workers)
+
+        async def _one(cve_id: str, platform: "Platform") -> tuple[str, Exception | None]:
+            # Per-task AppContext clone so concurrent CVEs don't race on
+            # `ctx.platform` (mutated in `orchestrator.run_cve`). Shallow
+            # by design: tools / registry / vector stores / progress
+            # reporter stay shared across tasks.
+            task_ctx = replace(app_ctx, platform=None)
+            async with sem:
+                try:
+                    await _run_one_cve_in_ctx(
+                        task_ctx,
+                        cve_id=cve_id,
+                        platform=platform,
+                        eval_mode=eval_mode,
+                        interactive=False,
+                        keep_idalib_alive=True,
+                    )
+                    return cve_id, None
+                except Exception as exc:
+                    # Per-CVE failure is recorded and the batch continues;
+                    # `KeyboardInterrupt` / `CancelledError` (BaseException)
+                    # propagate so Ctrl-C still tears the whole batch down.
+                    log.warning("batch_cve_failed", cve=cve_id, error=str(exc))
+                    return cve_id, exc
+
         try:
-            for cve_id, platform in cves:
-                await _run_one_cve_in_ctx(
-                    app_ctx,
-                    cve_id=cve_id,
-                    platform=platform,
-                    eval_mode=eval_mode,
-                    interactive=False,
-                    keep_idalib_alive=True,
-                )
+            log.info("batch_run_start", total=len(cves), workers=n_workers)
+            results = await asyncio.gather(
+                *[_one(c, p) for c, p in cves],
+                return_exceptions=False,
+            )
+            failures = [(cid, exc) for cid, exc in results if exc is not None]
+            log.info(
+                "batch_run_complete",
+                total=len(cves),
+                ok=len(cves) - len(failures),
+                failed=len(failures),
+                failed_cves=[cid for cid, _ in failures],
+            )
         finally:
             # Single aclose at the end of the batch — must happen
             # inside this coroutine (still own the event loop the
@@ -138,10 +245,7 @@ def run_batch_cves(
                 try:
                     await app_ctx.tools.idalib.aclose()
                 except Exception as exc:
-                    import structlog
-                    structlog.get_logger(__name__).warning(
-                        "idalib_aclose_error", error=str(exc)
-                    )
+                    log.warning("idalib_aclose_error", error=str(exc))
 
     try:
         with make_reporter() as progress:

@@ -12,6 +12,7 @@ from typing import Iterable
 import structlog
 
 from patchdiff_ai.observability.progress import ProgressHandle
+from patchdiff_ai.persistence.patch_store import resource_lock
 from patchdiff_ai.runtime.app_context import AppContext
 from patchdiff_ai.runtime.errors import DiskFullError, free_bytes_for
 from patchdiff_ai.tools.delta import DeltaApi
@@ -167,6 +168,12 @@ async def extract_kb(ctx: AppContext, kb_path: Path, dest: Path | None = None) -
     key (`report.txt` gates this function on subsequent runs and
     indexing reads only from the extracted dir), so keeping the
     multi-GB archive around buys nothing.
+
+    Concurrent CVEs in a parallel batch can target the same `.msu`;
+    serialise via `resource_lock(marker)` so only the first task does
+    the multi-GB 7-Zip / PSF work and the rest hit the cached marker.
+    Without this two CVEs would race writes into the same
+    `extracted_<msu>/` tree and corrupt the output.
     """
     kb_path = Path(kb_path)
     out = dest or kb_path.parent.absolute() / f"extracted_{kb_path.name}"
@@ -176,46 +183,53 @@ async def extract_kb(ctx: AppContext, kb_path: Path, dest: Path | None = None) -
         log.info("kb_extract_existing", out=str(out))
         return out
 
-    start = time.time()
-    handle = ctx.progress.extract_task(kb_path.name)
-    extractor = _KBExtractor(
-        seven_zip=ctx.tools.seven_zip,
-        delta=ctx.tools.delta,
-        progress=handle,
-        n_workers=ctx.settings.concurrency.extractor_workers,
-    )
-    try:
-        await extractor.submit(kb_path, out)
-        await extractor.join()
-    finally:
-        handle.complete()
+    async with resource_lock(marker.resolve()):
+        # Re-check inside the lock: a sibling CVE may have completed the
+        # extraction while we were waiting on the lock.
+        if marker.exists():
+            log.info("kb_extract_existing_after_wait", out=str(out))
+            return out
 
-    if extractor.fatal_error is not None:
-        raise extractor.fatal_error
-
-    log.info("kb_extracted", elapsed_s=round(time.time() - start, 2))
-
-    archives_tmp = out / "archives"
-    if archives_tmp.exists():
-        shutil.rmtree(archives_tmp, ignore_errors=True)
-
-    with marker.open("w", encoding="utf-8") as fh:
-        for e in extractor.extracted:
-            if e.suffix.lower() in EXECUTABLE_EXTENSIONS:
-                fh.write(str(e) + "\n")
-
-    log.info("kb_extracted_report", count=len(extractor.extracted), report=str(marker))
-
-    # `report.txt` is now committed — the .msu is redundant. Capture
-    # size first so we can log how much was reclaimed; failure here
-    # doesn't invalidate the extraction.
-    if kb_path.exists():
+        start = time.time()
+        handle = ctx.progress.extract_task(kb_path.name)
+        extractor = _KBExtractor(
+            seven_zip=ctx.tools.seven_zip,
+            delta=ctx.tools.delta,
+            progress=handle,
+            n_workers=ctx.settings.concurrency.extractor_workers,
+        )
         try:
-            freed_mb = kb_path.stat().st_size // 1_048_576
-            kb_path.unlink()
-            log.info("kb_msu_deleted", name=kb_path.name, freed_mb=freed_mb)
-        except OSError as exc:
-            log.warning("kb_msu_delete_failed", name=kb_path.name, error=str(exc))
+            await extractor.submit(kb_path, out)
+            await extractor.join()
+        finally:
+            handle.complete()
+
+        if extractor.fatal_error is not None:
+            raise extractor.fatal_error
+
+        log.info("kb_extracted", elapsed_s=round(time.time() - start, 2))
+
+        archives_tmp = out / "archives"
+        if archives_tmp.exists():
+            shutil.rmtree(archives_tmp, ignore_errors=True)
+
+        with marker.open("w", encoding="utf-8") as fh:
+            for e in extractor.extracted:
+                if e.suffix.lower() in EXECUTABLE_EXTENSIONS:
+                    fh.write(str(e) + "\n")
+
+        log.info("kb_extracted_report", count=len(extractor.extracted), report=str(marker))
+
+        # `report.txt` is now committed — the .msu is redundant. Capture
+        # size first so we can log how much was reclaimed; failure here
+        # doesn't invalidate the extraction.
+        if kb_path.exists():
+            try:
+                freed_mb = kb_path.stat().st_size // 1_048_576
+                kb_path.unlink()
+                log.info("kb_msu_deleted", name=kb_path.name, freed_mb=freed_mb)
+            except OSError as exc:
+                log.warning("kb_msu_delete_failed", name=kb_path.name, error=str(exc))
 
     return out
 

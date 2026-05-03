@@ -113,6 +113,13 @@ async def post_run_repl(
                             print(f"[+] Deleted reports for {cve}")
                     continue
                 case AssistantCommand.REANALYZE.value:
+                    if not cve:
+                        print(
+                            "[!] Reanalyze needs a bound CVE — start with "
+                            "`patchdiff-ai cve <CVE-ID> --chat` (or run a "
+                            "CVE first), then return here."
+                        )
+                        continue
                     model = _pick_model(ctx, "researcher")
                     if model:
                         # `force=True` bypasses CVE_INFO's cached-report
@@ -188,10 +195,11 @@ async def post_run_repl(
                 continue
             _console.print(Markdown(response))
     finally:
-        try:
-            await ctx.tools.ida_chat.aclose()
-        except Exception as exc:
-            log.warning("ida_chat_aclose_error", error=str(exc))
+        if ctx.tools.ida_chat is not None:
+            try:
+                await ctx.tools.ida_chat.aclose()
+            except Exception as exc:
+                log.warning("ida_chat_aclose_error", error=str(exc))
 
 
 def _print_reports(stores, cve: str) -> None:

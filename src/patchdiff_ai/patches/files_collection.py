@@ -1,10 +1,10 @@
 """KB-update DataFrame builders + PE descriptor utilities.
 
 WinSxS used to be read off the host machine here. That code path is gone
-— the bundled per-platform archives in `resources/windows_sxs/` (one
-`.7z` + `.bin` per Windows release) are the only baseline source now.
-The indexing logic (`get_files`) is kept since the offline indexer at
-`resources/index_winsxs.py` reuses it.
+— the per-platform archives in `<data_root>/windows_sxs/` (one `.7z` +
+`.bin` per Windows release) are the only baseline source now. The
+indexing logic (`get_files`) is kept since the `patchdiff-ai index`
+command (see `cli/commands/index.py`) reuses it.
 """
 
 from __future__ import annotations
@@ -108,7 +108,10 @@ def generate_df(
         # cheap relative to the per-file parsing inside get_files.
         paths = list(paths)
         progress.set_total(len(paths))
-    return pl.DataFrame(get_files(kb, paths, collect_hash, progress=progress))
+    return pl.DataFrame(
+        get_files(kb, paths, collect_hash, progress=progress),
+        schema_overrides={"delta_type": pl.Utf8, "hash": pl.Utf8},
+    )
 
 
 async def get_update_dataframe(

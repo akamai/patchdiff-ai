@@ -66,6 +66,13 @@ class AppContext:
     def build(cls, settings: Settings) -> "AppContext":
         """Construct the context; vector stores stay lazy."""
         registry = ModelRegistry.from_settings(settings)
+        # Auto-create a starter config.json on first run so the next
+        # invocation has a real file to edit. Idempotent — does nothing
+        # if the file already exists.
+        from patchdiff_ai.cli.commands.init import write_default_config
+        from patchdiff_ai.runtime.app_dirs import config_json_path
+
+        write_default_config(config_json_path())
 
         # `setdefault` so explicit user BINDIFF_PATH wins. python-bindiff
         # resolves the binary lazily on first diff.
