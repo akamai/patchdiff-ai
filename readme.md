@@ -77,7 +77,7 @@ LLM-driven supervisor. Every routing decision is a pure function of state.
 
 ```powershell
 # Install directly from GitHub (Windows PowerShell, Python 3.11+ x64)
-pip install git+https://github.com/<owner>/patchdiff-ai.git
+pip install git+https://github.com/maor-da/patchdiff-ai
 
 # Set up Azure OpenAI credentials in a .env file in your working dir,
 # then validate the install end-to-end
@@ -127,7 +127,7 @@ are supported as eval / fallback. See [Configuration](#configuration).
 ### From GitHub (recommended for end users)
 
 ```powershell
-pip install git+https://github.com/<owner>/patchdiff-ai.git
+pip install git+https://github.com/maor-da/patchdiff-ai
 ```
 
 The wheel ships the bundled BinDiff/BinExport DLLs (~9.5 MB) under
@@ -137,7 +137,7 @@ can copy them into your IDA 9.3 `plugins/` folder without extra downloads.
 ### From source (for development)
 
 ```powershell
-git clone https://github.com/<owner>/patchdiff-ai.git
+git clone https://github.com/maor-da/patchdiff-ai
 cd patchdiff-ai
 
 python -m venv .venv
