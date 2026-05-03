@@ -57,5 +57,15 @@ allow-direct-references = true
 [tool.hatch.build.targets.wheel]
 packages = ["src/patchdiff_ai"]
 
+# Project the bundled BinDiff/BinExport DLLs (~9.5 MB, IDA 9.3) into the
+# wheel under `patchdiff_ai/_resources/bindiff_ida_9.3/`. Outside the
+# package in the source tree so the dev layout (`resources/bindiff_ida_9.3/`)
+# stays intact; `runtime/paths.py` checks both locations at runtime so
+# editable installs hit the source-tree copy. The 3 GB `windows_sxs/`
+# tree is intentionally NOT bundled — users build it locally via
+# `resources/index_winsxs.py` and point at it via `PATHS__RESOURCES_DIR`.
+[tool.hatch.build.targets.wheel.force-include]
+"resources/bindiff_ida_9.3" = "patchdiff_ai/_resources/bindiff_ida_9.3"
+
 [tool.hatch.build.targets.sdist]
-include = ["src/patchdiff_ai", "CLAUDE.md"]
+include = ["src/patchdiff_ai", "resources/bindiff_ida_9.3", "CLAUDE.md"]
