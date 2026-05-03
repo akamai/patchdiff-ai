@@ -20,7 +20,7 @@ from patchdiff_ai.graphs.pipeline.routing import (
 )
 from patchdiff_ai.graphs.pipeline.state import PipelineState
 from patchdiff_ai.graphs.platform_internals.graph import build_pi_graph
-from patchdiff_ai.graphs.reverse_engineering.graph import build_re_graph
+from patchdiff_ai.graphs.reverse_engineering.router import build_re_router_graph
 from patchdiff_ai.graphs.vulnerability_research.graph import build_vr_graph
 from patchdiff_ai.runtime.app_context import AppContext
 
@@ -69,8 +69,10 @@ def build_pipeline_graph(
         gather_node if gather_node is not None else make_gather_node(ctx),
     )
     builder.add_node(PipelineNodeNames.PI_AGENT, build_pi_graph(ctx))
-    # Picks idalib vs legacy via `ctx.tools.idalib`.
-    builder.add_node(PipelineNodeNames.RE_AGENT, build_re_graph(ctx))
+    # Routes per Send: `ctx.platform.classify_candidate(...)` picks
+    # binary (IDA + BinDiff) or source (text udiff) backend; both
+    # produce the same `Artifact` shape.
+    builder.add_node(PipelineNodeNames.RE_AGENT, build_re_router_graph(ctx))
     builder.add_node(PipelineNodeNames.VR_AGENT, build_vr_graph(ctx))
     builder.add_node(PipelineNodeNames.FINALIZE, make_finalize_node(ctx))
 

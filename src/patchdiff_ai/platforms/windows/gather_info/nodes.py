@@ -23,7 +23,7 @@ from tenacity import (
     wait_random,
 )
 
-from patchdiff_ai.graphs.gather_info.state import GatherInfoState
+from patchdiff_ai.platforms.windows.gather_info.state import GatherInfoState
 from patchdiff_ai.llm.catalog import ModelPurpose
 from patchdiff_ai.patches.extractor import extract_kb, extraction_marker, load_delta_dlls
 from patchdiff_ai.patches.files_collection import (

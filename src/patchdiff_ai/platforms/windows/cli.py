@@ -11,9 +11,11 @@ Owns four commands:
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import click
+import structlog
 
 from patchdiff_ai.cli.options import cve_options
 from patchdiff_ai.platforms.windows.cycle import (
@@ -24,7 +26,13 @@ from patchdiff_ai.platforms.windows.cycle import (
 )
 
 if TYPE_CHECKING:
+    from patchdiff_ai.platforms.base import Platform
     from patchdiff_ai.platforms.windows.provider import WindowsProvider
+
+log = structlog.get_logger(__name__)
+
+
+_NATIVE_RESOLVE_CONCURRENCY = 10
 
 
 def build_windows_group(provider: "WindowsProvider") -> click.Group:
@@ -78,13 +86,18 @@ def build_windows_group(provider: "WindowsProvider") -> click.Group:
         "--platform-id",
         type=int,
         default=None,
-        help="Force a specific MSRC product ID. Default: every Windows release "
-             "configured in platforms.json.",
+        help="Force a specific MSRC product ID. Filters the cycle's CVE list "
+             "to those affecting that product AND runs every selected CVE "
+             "against that Windows release. Default: include CVEs affecting "
+             "any product in this cycle and pick the right Windows release "
+             "per CVE via MSRC.",
     )
     @click.option(
         "--platform-name",
         default="",
-        help="MSRC product-name filter (e.g. 'Windows 11 Version 24H2').",
+        help="MSRC product-name filter (e.g. 'Windows 11 Version 24H2'). "
+             "Filter-only — does not force a Windows version. Combine with "
+             "--platform-id if you also want to force one.",
     )
     @click.option(
         "--eval",
@@ -100,15 +113,31 @@ def build_windows_group(provider: "WindowsProvider") -> click.Group:
         platform_name: str,
         eval_mode: bool,
     ) -> None:
+        # Cheap validation first — fail fast before the CVRF download.
         try:
             month = normalize_month(cycle_id)
         except ValueError as exc:
             raise click.BadParameter(str(exc))
 
-        from patchdiff_ai.cli.runner import run_single_cve
+        from patchdiff_ai.cli.runner import run_batch_cves
 
         cvrf = download_cvrf(month)
-        ids: set[str] = {str(platform_id)} if platform_id is not None else set()
+
+        # Default product-ID filter when no flags given: every MSRC product
+        # this provider's configured versions know about. Without this the
+        # cycle returns zero CVEs because the legacy `pick_ids(set(), None)`
+        # contract was "filter by nothing → return nothing".
+        if platform_id is not None:
+            ids: set[str] = {str(platform_id)}
+        elif platform_name:
+            ids = set()  # pick_ids resolves the name → ids itself
+        else:
+            ids = {
+                str(pid)
+                for v in provider.versions
+                for pid in v.spec.msrc_product_ids
+            }
+
         targets, names = pick_ids(cvrf, platform_name or None, ids)
         if not targets:
             raise click.ClickException("No matching ProductIDs")
@@ -119,18 +148,47 @@ def build_windows_group(provider: "WindowsProvider") -> click.Group:
 
         click.echo(f"[*] Selected {names}: {len(cve_rows)} CVEs")
 
-        # Resolve the Windows version once if --platform-id was given;
-        # else pick the newest manifest entry per CVE.
-        platform = provider.resolve(platform_id=platform_id)
-        for row in cve_rows:
-            run_single_cve(
-                ctx,
-                cve_id=row["CVE"],
-                platform=platform,
-                eval_mode=eval_mode,
-                interactive=False,
-                chat=False,
-                chat_permissive=False,
+        # Per-CVE platform resolution.
+        # --platform-id given → force that version for every CVE.
+        # --platform-id absent → ask MSRC per CVE (matches_native) and
+        # fall back to the newest manifest entry for any CVE MSRC misses.
+        if platform_id is not None:
+            forced = provider.resolve(platform_id=platform_id)
+            cves: list[tuple[str, "Platform"]] = [(row["CVE"], forced) for row in cve_rows]
+        else:
+            cves = asyncio.run(
+                _resolve_per_cve(provider, [row["CVE"] for row in cve_rows])
             )
 
+        run_batch_cves(ctx, cves=cves, eval_mode=eval_mode)
+
     return grp
+
+
+async def _resolve_per_cve(
+    provider: "WindowsProvider", cve_ids: list[str]
+) -> list[tuple[str, "Platform"]]:
+    """Resolve each CVE's Windows version via MSRC, in parallel up to
+    `_NATIVE_RESOLVE_CONCURRENCY`. CVEs MSRC can't claim fall back to
+    `provider.resolve()` (newest manifest entry) and a warning log."""
+    sem = asyncio.Semaphore(_NATIVE_RESOLVE_CONCURRENCY)
+
+    async def _one(cve_id: str) -> "Platform":
+        async with sem:
+            try:
+                plat = await provider.matches_native(cve_id)
+            except Exception as exc:
+                log.warning("month_native_match_error", cve=cve_id, error=str(exc))
+                plat = None
+        if plat is None:
+            log.warning(
+                "month_native_match_fallback",
+                cve=cve_id,
+                hint="MSRC didn't claim this CVE for any configured Windows version. "
+                     "Falling back to newest. Pass --platform-id to force.",
+            )
+            plat = provider.resolve()
+        return plat
+
+    plats = await asyncio.gather(*[_one(c) for c in cve_ids])
+    return list(zip(cve_ids, plats))

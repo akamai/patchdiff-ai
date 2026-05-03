@@ -486,21 +486,25 @@ when `n_pairs * 2 > re_workers`.
 
 ### Selector
 
-[`graphs/pipeline/graph.py`](../src/patchdiff_ai/graphs/pipeline/graph.py):
+[`graphs/pipeline/graph.py`](../src/patchdiff_ai/graphs/pipeline/graph.py)
+mounts `build_re_router_graph(ctx)` (M3) as the RE_AGENT. The router
+classifies each candidate via `Platform.classify_candidate` and
+forwards into the matching backend subgraph:
 
 ```python
-re_node = build_re_graph(ctx)
-# build_re_graph itself picks the right `make_nodes` based on
-# `ctx.tools.idalib is None` (legacy) vs `is not None` (idalib).
+re_node = build_re_router_graph(ctx)
+# Routes per Send to:
+#   binary_graph.build_binary_re_graph(ctx)  — IDA + BinDiff
+#   source_graph.build_source_re_graph(ctx)  — text udiff
 ```
 
-When idalib isn't available (no IDA install, IDA 8.x without idalib,
-broken `idapro` activation), `AppContext.build` sets
-`ctx.tools.idalib = None`. `build_re_graph` then imports the legacy
-`make_nodes` from `nodes.py` instead of `nodes_idalib.py`, and the pipeline
-silently falls back to driving `idat.exe` as a per-pair subprocess. Same
-node names, same artefact shape — the substitution is invisible to
-everything downstream.
+Inside the binary backend, the idalib-vs-subprocess pick still happens
+at build time: `build_binary_re_graph` imports `nodes_idalib.make_nodes`
+when `ctx.tools.idalib is not None` and `nodes.make_nodes` otherwise
+(IDA 8.x fallback). When idalib isn't available (no IDA install, IDA
+8.x without idalib, broken `idapro` activation), `AppContext.build`
+sets `ctx.tools.idalib = None`. Same node names, same artefact shape —
+the substitution is invisible to everything downstream.
 
 ---
 
