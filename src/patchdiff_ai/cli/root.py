@@ -1,13 +1,12 @@
 """Click root for `patchdiff-ai`.
 
 Mounts:
-  * Generic core commands: `cve`, `health-check`, `install`.
+  * Generic core commands: `cve`, `health-check`, `install`, `cached`.
   * One sub-group per registered platform provider (`windows`, ...).
-  * The legacy typer-based `cached` command via the typer→Click bridge.
 
-The root callback configures structlog before any subcommand body runs,
-preserving the same ordering the legacy typer root had (env-strip
-already happened in `app._bootstrap()` before this module was imported).
+The root callback configures structlog before any subcommand body runs;
+env-strip already happened in `app._bootstrap()` before this module was
+imported.
 """
 
 from __future__ import annotations
@@ -89,11 +88,8 @@ def build_root() -> click.Group:
     for provider in providers():
         root.add_command(provider.cli_group())
 
-    # `cached` stays on typer for now; mount via the typer→Click bridge.
-    from typer.main import get_command
+    from patchdiff_ai.cli.commands.cached import cached_command
 
-    from patchdiff_ai.cli.commands import cached as cached_module
-
-    root.add_command(get_command(cached_module.app), name="cached")
+    root.add_command(cached_command)
 
     return root

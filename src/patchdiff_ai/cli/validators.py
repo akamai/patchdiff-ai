@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import re
 
-import typer
+import click
 
 CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,7}$", re.IGNORECASE)
 
 
 def cve_value(value: str) -> str:
     if not CVE_RE.match(value):
-        raise typer.BadParameter(
+        raise click.BadParameter(
             "Invalid CVE format; expected CVE-YYYY-NNNN[...] (e.g. CVE-2025-32713)"
         )
     return value.upper()

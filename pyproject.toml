@@ -5,9 +5,37 @@ build-backend = "hatchling.build"
 [project]
 name = "patchdiff-ai"
 version = "0.1.0"
-description = "Greenfield rewrite of PatchDiff-AI: CVE -> Windows patch RCA report."
-readme = "CLAUDE.md"
+description = "Turn a CVE ID into a binary-diff root-cause-analysis report — MSRC patches, IDA Pro + BinDiff, LLM-driven RE."
+readme = "readme.md"
 requires-python = ">=3.11"
+keywords = [
+    "security",
+    "vulnerability-research",
+    "reverse-engineering",
+    "patch-diff",
+    "binary-diff",
+    "ida-pro",
+    "bindiff",
+    "msrc",
+    "cve",
+    "rca",
+    "langgraph",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "Operating System :: Microsoft :: Windows :: Windows 10",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Security",
+    "Topic :: Software Development :: Disassemblers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     # Versions are frozen to the working set; bump deliberately, not casually.
     # langchain 1.x is the floor (`langchain.agents.create_agent` replaced
@@ -15,6 +43,7 @@ dependencies = [
     "azure-core==1.39.0",
     "azure-identity==1.25.3",
     "chromadb==1.5.8",
+    "click>=8.1",
     "langchain==1.2.15",
     "langchain-anthropic==1.4.1",
     "langchain-chroma==1.1.0",
@@ -43,7 +72,6 @@ dependencies = [
     "rich==15.0.0",
     "structlog==25.5.0",
     "tenacity==9.1.4",
-    "typer==0.25.0",
 ]
 
 [project.scripts]
@@ -68,4 +96,4 @@ packages = ["src/patchdiff_ai"]
 "resources/bindiff_ida_9.3" = "patchdiff_ai/_resources/bindiff_ida_9.3"
 
 [tool.hatch.build.targets.sdist]
-include = ["src/patchdiff_ai", "resources/bindiff_ida_9.3", "CLAUDE.md"]
+include = ["src/patchdiff_ai", "resources/bindiff_ida_9.3", "readme.md"]
