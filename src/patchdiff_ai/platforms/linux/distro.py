@@ -13,12 +13,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from patchdiff_ai.platforms.base import Platform
+from patchdiff_ai.platforms.base import Platform, RECategory, default_classify
 from patchdiff_ai.prompts.registry import PromptId
 
 if TYPE_CHECKING:
     from patchdiff_ai.graphs.pipeline.state import PipelineState
     from patchdiff_ai.runtime.app_context import AppContext
+    from patchdiff_ai.schemas.candidate import Candidate
     from patchdiff_ai.schemas.cve import CveDetails
 
 
@@ -57,3 +58,11 @@ class LinuxDistroPlatform(Platform):
         raise NotImplementedError(
             f"LinuxDistroPlatform({self.name!r}).candidate_metadata is a skeleton."
         )
+
+    def classify_candidate(self, candidate: "Candidate") -> RECategory:
+        # Linux distros ship a mix: ELF binaries (glibc, openssl), source
+        # patches (kernel debdiffs), interpreted scripts. The default
+        # extension-based classifier handles the common cases; override
+        # here when a real impl needs richer heuristics (magic bytes,
+        # MIME, dpkg metadata).
+        return default_classify(candidate)

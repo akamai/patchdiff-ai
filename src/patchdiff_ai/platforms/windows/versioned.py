@@ -18,13 +18,14 @@ from pathlib import Path
 import polars as pl
 import structlog
 
-from patchdiff_ai.platforms.base import Platform
+from patchdiff_ai.platforms.base import Platform, RECategory
 from patchdiff_ai.platforms.winsxs_archive import PlatformSpec, WinsxsArchive
 from patchdiff_ai.prompts.registry import PromptId
 
 if TYPE_CHECKING:
     from patchdiff_ai.graphs.pipeline.state import PipelineState
     from patchdiff_ai.runtime.app_context import AppContext
+    from patchdiff_ai.schemas.candidate import Candidate
     from patchdiff_ai.schemas.cve import CveDetails
 
 log = structlog.get_logger(__name__)
@@ -113,7 +114,7 @@ class WindowsVersionedPlatform(Platform):
         self, state: "PipelineState", ctx: "AppContext"
     ) -> dict[str, Any]:
         if self._gather_graph is None:
-            from patchdiff_ai.graphs.gather_info.graph import build_gather_graph
+            from patchdiff_ai.platforms.windows.gather_info.graph import build_gather_graph
             self._gather_graph = build_gather_graph(ctx)
         result = await self._gather_graph.ainvoke(state.model_dump())
         return {
@@ -131,6 +132,11 @@ class WindowsVersionedPlatform(Platform):
             for k, v in cve.msrc_report.model_dump().items()
             if k != "products"
         }
+
+    def classify_candidate(self, candidate: "Candidate") -> RECategory:
+        # MSRC packages ship PE binaries only — every candidate that
+        # makes it this far is something IDA + BinDiff can chew on.
+        return RECategory.BINARY
 
     # ----- Archive access (consumed by gather_info / delta_apply) -----------
 

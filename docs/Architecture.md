@@ -453,7 +453,14 @@ routing.
    VR_AGENT ──► FINALIZE ──► END
   ```
 
-#### Gather-info subgraph ([`graphs/gather_info/`](../src/patchdiff_ai/graphs/gather_info/))
+#### Gather subgraph ([`platforms/windows/gather_info/`](../src/patchdiff_ai/platforms/windows/gather_info/))
+
+This subgraph is **plugin-internal to the Windows provider** — the shared
+`graphs/` tree no longer contains any Windows-specific code. Other
+providers may implement `gather_packages` however they like (as a
+subgraph, a coroutine, anything that returns
+`{extracted, dataframes, filtered_dataframes}`); they don't import from
+here.
 
 - **Nodes**:
   - `download` — concurrent `download_kb` for current + previous, then concurrent
@@ -470,7 +477,9 @@ routing.
 - **Topology**: `DOWNLOAD → INDEX → (ADD_FILE_INFO* | UPDATE_VS) → UPDATE_VS → END`.
 
 LLM `add_file_info` calls are wrapped with `tenacity` (5 attempts, exponential
-backoff up to 60 s) on `RateLimitError`.
+backoff up to 60 s) on `RateLimitError`. The "Windows executable" file-description
+prompt lives at [`prompts/windows/file_description.system.md`](../src/patchdiff_ai/prompts/windows/file_description.system.md)
+(`PromptId.WINDOWS_FILE_DESC`).
 
 #### Platform-internals subgraph ([`graphs/platform_internals/`](../src/patchdiff_ai/graphs/platform_internals/))
 
@@ -500,32 +509,63 @@ data sources are platform-dependent; the ranking algorithm itself is shared.
   runs depends on the `interrupt: bool` from the run config.
 - Prompts live in [`prompts/platform_internals/{collect,rank}.system.md`](../src/patchdiff_ai/prompts/platform_internals/) (the default Windows set; the active platform plugin can override the prompt IDs).
 
-#### Reverse-engineering subgraphs
+#### Reverse-engineering router + backends ([`graphs/reverse_engineering/`](../src/patchdiff_ai/graphs/reverse_engineering/))
 
-A single subgraph at [`graphs/reverse_engineering/`](../src/patchdiff_ai/graphs/reverse_engineering/);
-[`graph.py`](../src/patchdiff_ai/graphs/reverse_engineering/graph.py) picks
-between two `make_nodes` implementations at build time based on
-`ctx.tools.idalib`:
+RE_AGENT is a **router** ([`router.py`](../src/patchdiff_ai/graphs/reverse_engineering/router.py))
+that picks a backend per Send by asking
+`ctx.platform.classify_candidate(candidate) -> RECategory`. Two
+backends today, both produce the same `Artifact` / `FunctionMatchRef`
+shape so VR is agnostic:
 
-- **idalib-backed** (preferred, [`nodes_idalib.py`](../src/patchdiff_ai/graphs/reverse_engineering/nodes_idalib.py))
-  — drives idalib directly through `IdalibPool`. No subprocess per pair,
-  warm IDB cache reuse, batched Hex-Rays decompile in one round-trip.
-  Selected when `ctx.tools.idalib is not None` (IDA 9.0+ with idalib
-  activated).
-- **idat-subprocess legacy** ([`nodes.py`](../src/patchdiff_ai/graphs/reverse_engineering/nodes.py))
-  — fallback for 8.x setups. Spawns `idat.exe -A -S<analyze.py>` then
-  `-S<decompile.py>` (batched 500 funcs per `.i64`). The IDA-side script
-  explicitly `idc.save_database("", 0)`s before `qexit` so the `.i64`
-  survives the run.
+- **Binary backend** ([`binary_graph.py`](../src/patchdiff_ai/graphs/reverse_engineering/binary_graph.py))
+  — IDA + BinDiff + Hex-Rays decompile. Selected for `RECategory.BINARY`
+  (Windows always; Linux when the candidate ends in `.so`/`.dylib`/
+  `.exe`/...). Picks between two `make_nodes` implementations at build
+  time based on `ctx.tools.idalib`:
+  - **idalib-backed** (preferred, [`nodes_idalib.py`](../src/patchdiff_ai/graphs/reverse_engineering/nodes_idalib.py))
+    — drives idalib directly through `IdalibPool`. No subprocess per
+    pair, warm IDB cache reuse, batched Hex-Rays decompile in one
+    round-trip. Selected when `ctx.tools.idalib is not None`
+    (IDA 9.0+ with idalib activated).
+  - **idat-subprocess legacy** ([`nodes.py`](../src/patchdiff_ai/graphs/reverse_engineering/nodes.py))
+    — fallback for 8.x setups. Spawns `idat.exe -A -S<analyze.py>`
+    then `-S<decompile.py>` (batched 500 funcs per `.i64`). The IDA-side
+    script explicitly `idc.save_database("", 0)`s before `qexit` so
+    the `.i64` survives the run.
 
-Both flows produce identical `Artifact`/`FunctionMatchRef` shapes — VR
-(downstream) is agnostic. Topology is the same too: `ANALYZE → DIFF_AND_DECOMPILE → END`.
-Shared helpers (`discover_parents`, `hexish`, `decompile_set_via_idalib`)
-live in [`_shared.py`](../src/patchdiff_ai/graphs/reverse_engineering/_shared.py).
+  Topology: `ANALYZE → DIFF_AND_DECOMPILE → END`. Shared helpers
+  (`discover_parents`, `hexish`, `decompile_set_via_idalib`) live in
+  [`_shared.py`](../src/patchdiff_ai/graphs/reverse_engineering/_shared.py).
 
-> Why the merged diff+decompile node? Splitting them caused `cannot pickle
-> 'sqlite3.Connection' object` when the checkpointer tried to serialize a
-> live `BinDiff` between nodes — and that's true for both implementations.
+- **Source backend** ([`source_graph.py`](../src/patchdiff_ai/graphs/reverse_engineering/source_graph.py))
+  — text udiff for source-code candidates. No IDA, no BinDiff. Selected
+  for `RECategory.SOURCE` (Linux source-package diffs, kernel patches,
+  scripts). Single node `DIFF_SOURCES`: reads pre/post text, writes
+  `__funcs__/<identifier>.txt` for both sides, emits one
+  `FunctionMatchRef(identifier=<filename-stem>, extension="txt")` per
+  changed file. Per-function splitting is left as follow-up — the
+  schema and VR support multiple `FunctionMatchRef`s per `Artifact`
+  already.
+
+The `FunctionMatchRef` schema in
+[`schemas/analysis.py`](../src/patchdiff_ai/schemas/analysis.py) carries
+both the binary-only fields (`address1/2: int`, `similarity / confidence:
+float`) and the M3 generalised fields (`identifier: str`, `extension:
+str`). VR's disk lookup is `<__funcs__>/<key>.<ext>` where
+`primary_key()` / `secondary_key()` fall back to the hex address when
+`identifier` is empty — so the binary path stays byte-identical to
+pre-M3.
+
+> Why the merged diff+decompile node in the binary backend? Splitting
+> them caused `cannot pickle 'sqlite3.Connection' object` when the
+> checkpointer tried to serialize a live `BinDiff` between nodes — true
+> for both idalib and subprocess implementations.
+
+> Adding a new backend (script-runtime, manifest, ...) is additive: drop
+> a new `<kind>_graph.py`, add an `RECategory.<KIND>` enum value in
+> [`platforms/base.py`](../src/patchdiff_ai/platforms/base.py), register
+> it in `router.py`'s `_BACKENDS`, and have at least one `Platform`'s
+> `classify_candidate` return the new value.
 
 #### Vulnerability-research subgraph ([`graphs/vulnerability_research/`](../src/patchdiff_ai/graphs/vulnerability_research/))
 
@@ -621,12 +661,16 @@ prompts/
 ├── platform_internals/
 │   ├── collect.system.md       # used by pi.collect (search-query derivation)
 │   └── rank.system.md          # used by pi.rank (file relevancy scoring)
-├── gather_info/
-│   └── file_description.system.md
+├── windows/
+│   └── file_description.system.md  # Windows provider: `add_file_info` embed prompt
 └── vulnerability_research/
     ├── score_functions.system.md   # used by vr.rank (function relevancy scoring)
     └── generate_report.system.md   # used by vr.analyze (RCA report generation)
 ```
+
+Provider-specific prompts (today: only `windows/`) live under
+`prompts/<provider>/`. New providers add their own subdirectory and a
+matching `PromptId` enum entry.
 
 Inline f-strings for CVE metadata are replaced with a JSON-formatted
 `HumanMessage`-builder helper inside the VR nodes.
@@ -807,7 +851,7 @@ The asyncio loop is the single concurrency primitive. Bounds:
 
 | Bound                                       | Default | Where                                                  |
 |---------------------------------------------|---------|--------------------------------------------------------|
-| Concurrent file_info LLM calls              | 500     | `Concurrency.file_info_semaphore` → `asyncio.Semaphore` in `gather_info.add_file_info` |
+| Concurrent file_info LLM calls              | 500     | `Concurrency.file_info_semaphore` → `asyncio.Semaphore` in `platforms/windows/gather_info/nodes.py:add_file_info` |
 | RE workers (per-CVE, fan-out limit)         | 5       | `Concurrency.re_workers` (currently advisory)          |
 | Extractor workers per KB                    | 5       | `Concurrency.extractor_workers` → `_KBExtractor` pool  |
 | LLM eval parallelism                        | 4       | `Concurrency.llm_eval_parallel`                        |
@@ -821,7 +865,7 @@ Locking:
   [`persistence/patch_store.py`](../src/patchdiff_ai/persistence/patch_store.py)) is
   the asyncio replacement for the legacy `threading.RLock` weak-ref table. Used to
   serialize KB downloads and patch-store writes by stable key (e.g. `dest.resolve()`).
-- `_file_info_mutex = threading.RLock()` in `gather_info.nodes` is intentionally
+- `_file_info_mutex = threading.RLock()` in `platforms/windows/gather_info/nodes.py` is intentionally
   reentrant; it serializes Chroma writes within a single graph execution. The
   `Concurrency.file_info_semaphore` is the actual concurrency cap — the lock
   exists only because Chroma's writer is not async.

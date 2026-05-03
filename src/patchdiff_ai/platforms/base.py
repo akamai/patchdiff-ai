@@ -15,6 +15,8 @@ Two layers:
 
 from __future__ import annotations
 
+from enum import Enum
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
@@ -23,6 +25,7 @@ if TYPE_CHECKING:
     from patchdiff_ai.graphs.pipeline.state import PipelineState
     from patchdiff_ai.prompts.registry import PromptId
     from patchdiff_ai.runtime.app_context import AppContext
+    from patchdiff_ai.schemas.candidate import Candidate
     from patchdiff_ai.schemas.cve import CveDetails
 
 
@@ -32,6 +35,49 @@ class UnknownPlatform(KeyError):
 
 class UnsupportedPlatform(LookupError):
     """No registered provider claims this CVE (NVD lookup found no match)."""
+
+
+class RECategory(str, Enum):
+    """Which RE backend handles a given candidate.
+
+    The router subgraph at `graphs/reverse_engineering/router.py` reads
+    `Platform.classify_candidate(c)` per Send and picks the matching
+    backend. New backends are an additive change: add an enum value,
+    add a backend subgraph, register it in the router.
+    """
+
+    BINARY = "binary"  # PE/ELF/Mach-O — IDA + BinDiff + Hex-Rays decompile
+    SOURCE = "source"  # text source files — udiff, no disassembly
+
+
+# File extensions the default classifier recognises. Providers can
+# override `classify_candidate` to use richer heuristics (magic-byte
+# sniff, MIME, etc.) but most cases are unambiguous from extension.
+_BINARY_EXTS: frozenset[str] = frozenset(
+    {".exe", ".dll", ".sys", ".ocx", ".cpl", ".scr", ".com",
+     ".so", ".dylib", ".bundle"}
+)
+_SOURCE_EXTS: frozenset[str] = frozenset(
+    {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp",
+     ".py", ".js", ".ts", ".rs", ".go", ".java", ".kt",
+     ".rb", ".php", ".pl", ".sh", ".bash"}
+)
+
+
+def default_classify(candidate: "Candidate") -> RECategory:
+    """Extension-based fallback classifier.
+
+    Used by `Platform.classify_candidate` when a provider doesn't
+    override it. Unrecognised extensions default to BINARY (the
+    historical Windows behaviour) so existing flows keep working.
+    """
+    name = candidate.name or ""
+    # Cross-platform suffix extraction (paths come in with either slash
+    # style depending on the upstream patch_store row).
+    suffix = PureWindowsPath(name).suffix.lower() or PurePosixPath(name).suffix.lower()
+    if suffix in _SOURCE_EXTS:
+        return RECategory.SOURCE
+    return RECategory.BINARY
 
 
 class Platform(Protocol):
@@ -64,6 +110,17 @@ class Platform(Protocol):
 
     def candidate_metadata(self, cve: "CveDetails") -> dict[str, Any]:
         """Project advisory data into a JSON-able dict for ranking prompts."""
+        ...
+
+    def classify_candidate(self, candidate: "Candidate") -> RECategory:
+        """Decide which RE backend handles `candidate`.
+
+        Default implementation in concrete classes can just `return
+        default_classify(candidate)`. Override when extension is
+        ambiguous (e.g. Linux source `.so.1.2.3` versioned names that
+        end in a numeric suffix) or when a magic-byte check is
+        cheaper / more accurate.
+        """
         ...
 
 

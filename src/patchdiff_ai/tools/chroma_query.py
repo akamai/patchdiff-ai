@@ -7,7 +7,7 @@ covers all access paths (exact ids, semantic, metadata filter), plus
 Schemas are hardcoded next to the collection names, sourced from the
 three write sites:
   - reports     → graphs/vulnerability_research/nodes.py (in `generate`)
-  - file_info   → graphs/gather_info/nodes.py:247
+  - file_info   → platforms/windows/gather_info/nodes.py (in `add_file_info`)
   - func_logic  → graphs/vulnerability_research/nodes.py
                   (in `_persist_func_logic`, called from `indexing`)
 """
@@ -54,7 +54,7 @@ class ChromaQueryService:
                 ("package", "str", "Lowercased KB / package"),
                 ("description", "str", "Lowercased free-text summary"),
             ],
-            "schema_source": "graphs/gather_info/nodes.py:247",
+            "schema_source": "platforms/windows/gather_info/nodes.py (add_file_info)",
         },
         "func_logic": {
             "attr": "func_logic",

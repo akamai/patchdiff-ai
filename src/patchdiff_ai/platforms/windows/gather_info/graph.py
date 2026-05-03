@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from langgraph.graph import END, StateGraph
 
-from patchdiff_ai.graphs.gather_info.nodes import GatherNodes, make_nodes
-from patchdiff_ai.graphs.gather_info.state import GatherInfoState
+from patchdiff_ai.platforms.windows.gather_info.nodes import GatherNodes, make_nodes
+from patchdiff_ai.platforms.windows.gather_info.state import GatherInfoState
 from patchdiff_ai.runtime.app_context import AppContext
 
 

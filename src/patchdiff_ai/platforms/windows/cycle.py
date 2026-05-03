@@ -2,16 +2,15 @@
 
 Moved from the now-defunct top-level `patches/platform_filter.py`. Lives
 inside the windows plugin because Patch Tuesday is an MSRC-only concept.
-The `windows month` Click command (in `cli.py`) is the only consumer.
+Consumers: `windows month` (in `cli.py`) and the legacy `cached --month`
+flow in `cli/commands/cached.py`.
 """
 
 from __future__ import annotations
 
 import re
-import textwrap
 from typing import Iterable, Sequence
 
-import polars as pl
 import requests
 import structlog
 
@@ -91,15 +90,6 @@ def pick_ids(
     return ids, chosen_names
 
 
-def get_platforms_by_ids(ids: set[str]) -> set[tuple[str, int]]:
-    """Resolve product IDs against the latest CVRF."""
-    from patchdiff_ai.patches.os_detection import get_cvrf_data, load_product_tree
-
-    data = get_cvrf_data()
-    name_by_id = {str(k): v for k, v in load_product_tree(data).items()}
-    return {(name_by_id.get(str(i), str(i)), int(i)) for i in ids}
-
-
 def collect_cves(cvrf: dict, wanted: set[str]) -> list[dict]:
     rows = []
     for v in cvrf["Vulnerability"]:
@@ -128,21 +118,3 @@ def collect_cves(cvrf: dict, wanted: set[str]) -> list[dict]:
     return rows
 
 
-def get_pt_cve_list_by_platform(
-    month: str, targets: set[str], name: str | None = None
-) -> tuple[pl.DataFrame, list[str], set[str]]:
-    data = download_cvrf(month)
-    targets, names = pick_ids(data, name, targets)
-    records = collect_cves(data, targets)
-    return pl.DataFrame(records).sort("CVE"), names, targets
-
-
-def print_cve_list(df: pl.DataFrame) -> str:
-    wrapped = df.with_columns(
-        pl.col("Title").map_elements(
-            lambda s: "\n".join(textwrap.wrap(s, 60)),
-            return_dtype=pl.Utf8,
-        )
-    )
-    with pl.Config(tbl_rows=wrapped.height, tbl_cols=wrapped.width, fmt_str_lengths=200):
-        return str(wrapped)

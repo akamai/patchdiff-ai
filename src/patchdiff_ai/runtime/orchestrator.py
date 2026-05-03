@@ -29,6 +29,7 @@ async def run_cve(
     interactive: bool = False,
     evaluate: bool = False,
     force: bool = False,
+    keep_idalib_alive: bool = False,
     interactor: CliInteractor | None = None,
 ) -> dict[str, Any]:
     """Run the pipeline graph for a single CVE end-to-end.
@@ -41,6 +42,11 @@ async def run_cve(
     `force=True` bypasses the CVE_INFO cached-report short-circuit so
     a reanalyze actually re-runs (orthogonal to `evaluate`, which fans
     the analysis across every eval model).
+
+    `keep_idalib_alive=True` skips this run's idalib pool teardown so a
+    batch caller (`cli.runner.run_batch_cves`) can reuse the same pool
+    across many CVEs in one event loop. The batch caller is responsible
+    for awaiting `ctx.tools.idalib.aclose()` once at the end.
     """
     from patchdiff_ai.graphs.pipeline.graph import build_pipeline_graph
     from patchdiff_ai.graphs.pipeline.state import PipelineState
@@ -122,7 +128,10 @@ async def run_cve(
             # worker IO threads attached to. `AppContext.close()` is sync
             # and runs after `asyncio.run` returns — too late to unwind
             # `loop.run_in_executor` futures cleanly.
-            if ctx.tools.idalib is not None:
+            #
+            # `keep_idalib_alive=True` defers the teardown to the batch
+            # caller so the same pool can serve many CVEs in one loop.
+            if not keep_idalib_alive and ctx.tools.idalib is not None:
                 try:
                     await ctx.tools.idalib.aclose()
                 except Exception as exc:
