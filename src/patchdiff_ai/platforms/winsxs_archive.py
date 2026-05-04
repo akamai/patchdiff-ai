@@ -38,10 +38,13 @@ class PlatformSpec:
     id: str
     primary_product_id: int
     slug: str
-    archive: str           # filename (relative to the manifest's dir)
+    archive: str           # filename or dirname (relative to the manifest's dir)
     dataframe: str         # filename (relative to the manifest's dir)
     msrc_product_ids: tuple[int, ...]
     msrc_product_name_pattern: str
+    # "archive" -> .7z file, extracted on demand into a tempdir.
+    # "directory" -> folder with executables already on disk; no extraction.
+    type: str = "archive"
 
     @classmethod
     def from_dict(cls, d: dict) -> "PlatformSpec":
@@ -53,6 +56,7 @@ class PlatformSpec:
             dataframe=d["dataframe"],
             msrc_product_ids=tuple(int(x) for x in d.get("msrc_product_ids", [])),
             msrc_product_name_pattern=d.get("msrc_product_name_pattern", ""),
+            type=d.get("type", "archive"),
         )
 
 
@@ -144,8 +148,30 @@ class WinsxsArchive:
         reconstruct the base KB binary. The returned tmp dir mirrors
         the archive layout, so callers can rebuild absolute paths via
         `tmp / row["path"]`.
+
+        When the platform is backed by a directory (``spec.type ==
+        "directory"``), the files are already on disk — yield the
+        directory path directly without any extraction.
         """
         rows = list(rows)
+
+        # --- directory mode: files already on disk --------------------------
+        if self.spec.type == "directory":
+            if not self.archive_path.is_dir():
+                raise FileNotFoundError(
+                    f"Directory missing for platform {self.spec.id!r}: "
+                    f"{self.archive_path}. Run the indexer to produce it."
+                )
+            log.info(
+                "winsxs_directory_yield",
+                platform=self.spec.id,
+                files=len(rows),
+                directory=str(self.archive_path),
+            )
+            yield self.archive_path
+            return
+
+        # --- archive mode: extract from .7z ---------------------------------
         if not rows:
             with tempfile.TemporaryDirectory(prefix=f"winsxs_{self.spec.id}_") as tmp:
                 yield Path(tmp)
