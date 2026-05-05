@@ -13,8 +13,9 @@ run `patchdiff-ai install` to bootstrap the remaining components (idalib + IDA
 | Windows Server 2025 (evaluation ISO) | https://software-static.download.prss.microsoft.com/pr/download/17763.737.190906-2324.rs5_release_svc_refresh_SERVERHYPERCORE_OEM_x64FRE_en-us_1.iso |
 | Windows 11 (ISO) | https://www.microsoft.com/en-gb/software-download/windows11 |
 
-The Windows ISOs are used to build a local WinSxS index
-(`resources/index_winsxs.py`) — they are not bundled because of size.
+The Windows ISOs are used to build a local WinSxS index via
+`patchdiff-ai index <winsxs-dir> --product-name "..." --slug ...` — they
+are not bundled because of size.
 
 IDA Pro 8.x or 9.x and BinDiff 8.0 + BinExport 12+ are also required at
 runtime; install IDA from your licensed source. The bundled BinDiff/BinExport
@@ -24,13 +25,18 @@ automatically.
 
 ## Automated install
 
-After the manual downloads above, run:
+After the manual downloads above, bootstrap the per-user config and then
+run the installer:
 
 ```powershell
-patchdiff-ai install
+patchdiff-ai init           # writes %APPDATA%\patchdiff-ai\config.json
+patchdiff-ai install        # idalib + IDA 9.3 BinDiff/BinExport plugins
 ```
 
-This iterates every registered platform provider and installs its
+`patchdiff-ai init` writes a starter `config.json` you can edit to point
+at credentials and tool paths. (If you skip it, the first command that
+needs settings auto-creates the same template.) `patchdiff-ai install`
+iterates every registered platform provider and installs its
 prerequisites. On Windows that means:
 
 1. `idalib` — pip-installs the `idapro-*-py3-none-any.whl` shipped under
@@ -59,4 +65,4 @@ one is discovered.
 patchdiff-ai health-check
 ```
 
-Validates `.env`, every tool path, and provider credentials end-to-end.
+Validates `config.json`, every tool path, and provider credentials end-to-end.

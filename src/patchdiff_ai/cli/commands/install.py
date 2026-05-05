@@ -69,7 +69,8 @@ def _resolve_target(ida_root: Path | None) -> IdaInstall:
     inst = select_ida_install(discover_ida_installs())
     if inst is None:
         raise click.BadParameter(
-            "No IDA install found. Pass --ida-root or set TOOLS__IDA in .env."
+            "No IDA install found. Pass --ida-root, set tools.ida in config.json, "
+            "or set TOOLS__IDA env var."
         )
     return inst
 

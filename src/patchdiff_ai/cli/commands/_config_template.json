@@ -1,0 +1,57 @@
+{
+  "log_level": "INFO",
+  "data_root": null,
+
+  "paths": {
+    "db_dir": null,
+    "reports_dir": null,
+    "temp_dir": null,
+    "logs_dir": null,
+    "patch_store_dir": null,
+    "windows_sxs_dir": null
+  },
+
+  "tools": {
+    "seven_zip": "C:/Program Files/7-Zip/7z.exe",
+    "ida": null,
+    "process_timeout_seconds": 1800
+  },
+
+  "models": {
+    "embedding": "azure.text-embedding-3-small",
+    "default": "claude.sonnet-4.6",
+    "gather_info": "azure.gpt-4.1-mini",
+    "platform_internals": "azure.gpt-5.2",
+    "reverse_engineering": "azure.gpt-5.2",
+    "researcher": "azure.gpt-5.2"
+  },
+
+  "thresholds": {
+    "candidates": 7.5,
+    "security_modification": 0.25,
+    "report": 0.1
+  },
+
+  "concurrency": {
+    "file_info_semaphore": 500,
+    "re_workers": 12,
+    "extractor_workers": 5,
+    "llm_eval_parallel": 4,
+    "cve_workers": 12,
+    "kb_downloads": 6
+  },
+
+  "azure": {
+    "endpoint": null,
+    "tenant_id": null,
+    "client_id": null,
+    "client_secret": null
+  },
+  "anthropic": {
+    "api_key": null,
+    "base_url": "https://api.anthropic.com"
+  },
+  "gemini": {
+    "api_key": null
+  }
+}

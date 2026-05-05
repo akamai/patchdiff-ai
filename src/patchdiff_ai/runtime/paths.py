@@ -48,8 +48,28 @@ def _resolve_bundled_bindiff_dir() -> Path:
     return PROJECT_ROOT / "resources" / "bindiff_ida_9.3"
 
 
+def _resolve_bundled_update_compression() -> Path:
+    """Locate ``UpdateCompression.dll`` for both wheel and source-tree installs.
+
+    Same wheel/source dual-layout logic as the BinDiff resolver — picks
+    the projected copy under ``<package>/_resources/`` when present,
+    otherwise the dev tree under ``<repo>/resources/``. Returns a path
+    that may not exist; the runtime falls back to KB-bundled
+    ``UpdateCompression.dll`` copies at delta-apply time anyway.
+    """
+    inside_pkg = _PACKAGE_ROOT / "_resources" / "UpdateCompression.dll"
+    if inside_pkg.is_file():
+        return inside_pkg
+    return PROJECT_ROOT / "resources" / "UpdateCompression.dll"
+
+
 # Bundled BinDiff binary + IDA plugin DLLs (binexport12_ida64.dll,
 # bindiff8_ida64.dll, bindiff.exe). Wired into the BINDIFF_PATH env at
 # `AppContext.build()` so python-bindiff finds the binary; copied into IDA's
 # plugins dir by `patchdiff-ai install ida-plugins`.
 BUNDLED_BINDIFF_DIR = _resolve_bundled_bindiff_dir()
+
+# Bundled `UpdateCompression.dll`. Default ``settings.tools.update_compression_dll``
+# resolves to this; per-KB copies extracted from `DesktopDeployment.cab` are
+# loaded on top at runtime, latest-wins.
+BUNDLED_UPDATE_COMPRESSION_DLL = _resolve_bundled_update_compression()

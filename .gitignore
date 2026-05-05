@@ -1,15 +1,17 @@
 .env
-_temp/
 .venv/
 .claude/
 **/__pycache__/**
 
-
 # temp
 patchdiff-ai-wip-models_config
 .plan
-db/
 
+# Stray CWD-relative artifacts. Real ones live under %APPDATA%/patchdiff-ai/;
+# these entries catch leftover folders if anything still writes to CWD.
+_temp/
+db/
 logs/
+reports/
 
 resources/windows_sxs/

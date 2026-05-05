@@ -33,7 +33,7 @@ log = structlog.get_logger(__name__)
 
 @dataclass(frozen=True)
 class PlatformSpec:
-    """One entry from `resources/windows_sxs/platforms.json`."""
+    """One entry from `<data_root>/windows_sxs/platforms.json`."""
 
     id: str
     primary_product_id: int
@@ -129,8 +129,8 @@ class WinsxsArchive:
                 raise FileNotFoundError(
                     f"DataFrame missing for platform {self.spec.id!r}: "
                     f"{self.dataframe_path}. Run "
-                    f"`python resources/index_winsxs.py <winsxs_dir> "
-                    f"--product-id {self.spec.primary_product_id} "
+                    f"`patchdiff-ai index <winsxs_dir> "
+                    f"--product-ids {self.spec.primary_product_id} "
                     f"--slug {self.spec.slug}` to build it."
                 )
             self._df = pl.DataFrame.deserialize(self.dataframe_path)

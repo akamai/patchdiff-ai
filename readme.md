@@ -79,7 +79,10 @@ LLM-driven supervisor. Every routing decision is a pure function of state.
 # Install directly from GitHub (Windows PowerShell, Python 3.11+ x64)
 pip install git+https://github.com/akamai/patchdiff-ai
 
-# Set up Azure OpenAI credentials in a .env file in your working dir,
+# Write a starter config.json into %APPDATA%\patchdiff-ai\
+patchdiff-ai init
+
+# Edit %APPDATA%\patchdiff-ai\config.json (Azure / Anthropic creds, tool paths),
 # then validate the install end-to-end
 patchdiff-ai health-check
 
@@ -173,91 +176,143 @@ refuses to copy them into 8.x or 9.0 because they wouldn't load.
 ### Adding a Windows version
 
 The 3 GB `windows_sxs/` archive tree is **not** bundled — too large for a
-pip install. To analyse a Windows version that isn't already in
-`resources/windows_sxs/platforms.json`, build your own:
+pip install. To analyse a Windows version that isn't already registered in
+`<data_root>/windows_sxs/platforms.json`, build your own:
 
 ```powershell
-python resources/index_winsxs.py <path-to-WinSxS> ^
-       --product-id <MSRC-product-id> ^
-       --slug <slug-like-windows_11_24h2>
+patchdiff-ai index <path-to-WinSxS> `
+    --product-name "Windows 11 Version 24H2" `
+    --slug windows_11_24h2
 ```
 
-Then point at the directory containing `platforms.json`:
-
-```env
-PATHS__RESOURCES_DIR=path/to/resources
-```
+The command tokenises `--product-name` against the current month's MSRC
+CVRF, lets you pick one or more matching `productId`s interactively, then
+writes the indexed DataFrame, the compressed `.7z`, and the updated
+`platforms.json` into `<data_root>/windows_sxs/`. Pass
+`--product-ids 12390[,12436,...]` to skip the prompt.
 
 ---
 
 ## Configuration
 
-Everything is read from `.env` (or process env) via `pydantic-settings`.
-Nested fields use `__` as the delimiter — e.g.
-`PATHS__DB_DIR=/data/patchdiff/db`.
+All configuration lives in **`config.json`** at the per-user app data
+root: `%APPDATA%\patchdiff-ai\config.json` on Windows,
+`~/.local/share/patchdiff-ai/config.json` elsewhere. Bootstrap it with:
+
+```powershell
+patchdiff-ai init
+```
+
+This writes a starter template you can edit. (If you skip `init`, the
+first command that needs settings — like `health-check` — auto-creates
+the same template.) Override `data_root` itself by setting the
+`PATCHDIFF_AI_HOME` environment variable.
+
+**Environment variables still win** over `config.json`. Precedence,
+highest first: explicit `Settings(...)` kwargs → env vars → `config.json`
+→ defaults. Nested fields use `__` as the delimiter — e.g.
+`PATHS__DB_DIR=D:/scratch/db` overrides `paths.db_dir` for one run
+without editing the file.
 
 ### Azure OpenAI (primary)
 
-```env
-AZURE_ENDPOINT=https://<resource>.openai.azure.com
-AZURE_TENANT_ID=...
-AZURE_CLIENT_ID=...
-AZURE_CLIENT_SECRET=...
+```jsonc
+{
+  "azure": {
+    "endpoint": "https://<resource>.openai.azure.com",
+    "tenant_id": "...",
+    "client_id": "...",
+    "client_secret": "..."
+  }
+}
 ```
 
-If the service-principal trio is absent, the registry falls back to
-`DefaultAzureCredential` (e.g. `az login`).
+Or via env vars: `AZURE_ENDPOINT`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
+`AZURE_CLIENT_SECRET`. If the service-principal trio is absent, the
+registry falls back to `DefaultAzureCredential` (e.g. `az login`).
 
 ### Anthropic / Gemini (eval / fallback)
 
-```env
-ANTHROPIC_API_KEY=...
-GOOGLE_API_KEY=...
+```jsonc
+{
+  "anthropic": { "api_key": "..." },
+  "gemini":    { "api_key": "..." }
+}
 ```
+
+Env equivalents: `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`.
 
 ### Per-purpose model overrides (optional)
 
 Defaults are in [src/patchdiff_ai/llm/catalog.py](src/patchdiff_ai/llm/catalog.py).
 
-```env
-MODELS_DEFAULT=azure.o4-mini
-MODELS_GATHER_INFO=azure.gpt-4.1-nano
-MODELS_PLATFORM_INTERNALS=azure.gpt-4.1-mini
-MODELS_REVERSE_ENGINEERING=azure.o3-mini
-MODELS_RESEARCHER=azure.o3
-MODELS_EMBEDDING=azure.text-embedding-3-small
+```jsonc
+{
+  "models": {
+    "default": "azure.o4-mini",
+    "gather_info": "azure.gpt-4.1-nano",
+    "platform_internals": "azure.gpt-4.1-mini",
+    "reverse_engineering": "azure.o3-mini",
+    "researcher": "azure.o3",
+    "embedding": "azure.text-embedding-3-small"
+  }
+}
 ```
 
 ### Tool paths (override only if non-default)
 
-```env
-TOOLS__SEVEN_ZIP=C:/Program Files/7-Zip/7z.exe
-TOOLS__IDA=C:/Program Files/IDA Professional 9.3/idat.exe
+```jsonc
+{
+  "tools": {
+    "seven_zip": "C:/Program Files/7-Zip/7z.exe",
+    "ida": "C:/Program Files/IDA Professional 9.3/idat.exe"
+  }
+}
 ```
 
-When `TOOLS__IDA` is unset the runtime auto-discovers installs and picks the
-newest one with `idalib`.
+When `tools.ida` is unset (or `null`), the runtime auto-discovers installs
+and picks the newest one with `idalib`.
 
 ### Filesystem layout
 
-```env
-PATHS__DB_DIR=db                 # Chroma + patch-store
-PATHS__REPORTS_DIR=reports       # plain-text reports
-PATHS__TEMP_DIR=_temp            # downloaded + extracted KBs
-PATHS__LOGS_DIR=logs             # per-run JSON logs
-PATHS__RESOURCES_DIR=resources   # WinSxS archives + manifests
+Every generated artifact lives under one ``data_root`` so the tool
+behaves identically across CWDs. By default:
+
+| Path             | Default location                                 |
+|------------------|--------------------------------------------------|
+| `data_root`      | `%APPDATA%/patchdiff-ai/`                        |
+| `db_dir`         | `<data_root>/db/` — Chroma + patch-store         |
+| `reports_dir`    | `<data_root>/reports/` — plain-text reports      |
+| `temp_dir`       | `<data_root>/_temp/` — downloaded + extracted KBs |
+| `logs_dir`       | `<data_root>/logs/` — per-run JSON logs          |
+| `windows_sxs_dir`| `<data_root>/windows_sxs/` — archives + manifest |
+
+Override the whole tree by setting `data_root` in `config.json` (or
+`PATCHDIFF_AI_HOME=...` in env). Override individual paths to point one
+folder elsewhere — e.g. put `db_dir` on a fast SSD:
+
+```jsonc
+{
+  "paths": { "db_dir": "D:/fast-ssd/patchdiff-db" }
+}
 ```
 
 ### Concurrency
 
-```env
-CONCURRENCY__CVE_WORKERS=12         # parallel CVEs in a batch run
-CONCURRENCY__KB_DOWNLOADS=6         # concurrent multi-GB MS Update streams
-CONCURRENCY__RE_WORKERS=12          # idalib worker processes
-CONCURRENCY__EXTRACTOR_WORKERS=5    # 7-Zip/PSF extraction workers per KB
-CONCURRENCY__FILE_INFO_SEMAPHORE=500  # cap on concurrent gather-stage LLM calls
-CONCURRENCY__LLM_EVAL_PARALLEL=4    # parallel report generation in --eval mode
+```jsonc
+{
+  "concurrency": {
+    "cve_workers": 12,         // parallel CVEs in a batch run
+    "kb_downloads": 6,         // concurrent multi-GB MS Update streams
+    "re_workers": 12,          // idalib worker processes
+    "extractor_workers": 5,    // 7-Zip/PSF extraction workers per KB
+    "file_info_semaphore": 500,  // cap on concurrent gather-stage LLM calls
+    "llm_eval_parallel": 4     // parallel report generation in --eval mode
+  }
+}
 ```
+
+Or via env: `CONCURRENCY__CVE_WORKERS=12`, etc.
 
 See [Concurrency & tuning](#concurrency--tuning) below for guidance.
 
@@ -266,7 +321,7 @@ See [Concurrency & tuning](#concurrency--tuning) below for guidance.
 LangSmith / LangChain tracing is force-disabled at startup, and Chroma's
 anonymous telemetry is disabled before the client is imported. **No
 observability data leaves the machine** — everything goes to structlog and
-the per-run log file under `logs/`.
+the per-run log file under `<data_root>/logs/`.
 
 ---
 
@@ -314,7 +369,7 @@ patchdiff-ai cached --month 2026-Apr --platform-ids 12390,12436
 ```
 
 Reads back any reports already persisted to the `reports` Chroma collection
-and saves them under `reports/`. No graph runs.
+and saves them under `<data_root>/reports/`. No graph runs.
 
 ### Verbosity
 
@@ -323,8 +378,8 @@ patchdiff-ai -L debug cve CVE-2025-29824
 patchdiff-ai -L trace cve CVE-2025-29824   # full crash tracebacks to log file
 ```
 
-JSON logs land in `logs/<unix>.<uuid>.log`; the console gets a colourised
-renderer in TTYs.
+JSON logs land in `<data_root>/logs/<unix>.<uuid>.log`; the console gets a
+colourised renderer in TTYs.
 
 ### CVE-less chat
 
@@ -347,7 +402,7 @@ an LLM:
 |----------------------|-----------------------------------------------------------------|
 | `help`               | Show this list.                                                 |
 | `reports`            | Print every cached RCA report for the bound CVE.                |
-| `save reports`       | Save them to `./` as `<CVE>_<file>.txt`.                        |
+| `save reports`       | Save them to `<data_root>/reports/` as `<CVE>_<file>.txt`.      |
 | `delete all reports` | Drop the bound CVE's entries from Chroma (with `[y/N]`).        |
 | `reanalyze`          | Re-run the full pipeline (requires a bound CVE + platform).     |
 | `change assistant`   | Pick a different chat model from the registry.                  |
@@ -384,12 +439,12 @@ in the REPL. `--chat-permissive` skips the gate.
 
 Two persistence layers, both local:
 
-- **Chroma** at `db/`. Three collections back the analysis loop:
+- **Chroma** at `<data_root>/db/`. Three collections back the analysis loop:
   - `windows.exe.desc` — file descriptions for candidate retrieval.
   - `windows.exe.functions.logic` — per-function summaries.
   - `windows.exe.rca.reports` — final RCA reports. Used to short-circuit
     re-runs and serve `patchdiff-ai cached`.
-- **Filesystem** at `reports/<CVE>_<file>.txt` — plain ASCII, human-readable.
+- **Filesystem** at `<data_root>/reports/<CVE>_<file>.txt` — plain ASCII, human-readable.
 
 Each report carries:
 
@@ -473,7 +528,7 @@ jq 'select(.event=="batch_run_complete") | .failed_cves'
               │
               ▼
    ┌──────────────────────┐
-   │         CLI          │   click + .env loader; per-platform sub-groups
+   │         CLI          │   click + JSON config loader; per-platform sub-groups
    └──────────┬───────────┘   (windows / linux / ...); resolves CVE→Platform
               │               via parallel native (MSRC) + NVD fallback
               │ AppContext (DI bundle) + resolved Platform
@@ -575,29 +630,32 @@ patchdiff-ai/
 │   ├── Architecture.md                   # full architecture write-up
 │   ├── Pipeline.png
 │   └── ChatAgent.png
-├── resources/
-│   ├── bindiff_ida_9.3/                  # bundled BinDiff + IDA 9.3 plugins
-│   ├── windows_sxs/                      # per-platform WinSxS archives (gitignored, build locally)
-│   └── index_winsxs.py                   # WinSxS indexer
+├── resources/                            # bundled assets (projected into the wheel)
+│   ├── bindiff_ida_9.3/                  # BinDiff + IDA 9.3 plugins
+│   ├── UpdateCompression.dll             # delta-apply DLL baseline
+│   └── prerequisites.md                  # manual-download checklist
 ├── src/patchdiff_ai/
 │   ├── __init__.py                       # exposes run_cve()
 │   ├── __main__.py                       # python -m patchdiff_ai
 │   ├── cli/                              # click entry points + chat REPL
-│   ├── config/                           # pydantic-settings models
+│   ├── config/                           # pydantic-settings models (JSON-backed)
 │   ├── llm/                              # registry + provider factories
 │   ├── observability/                    # structlog + callbacks + progress
 │   ├── persistence/                      # Chroma + patch-store + disk caches
 │   ├── platforms/                        # Platform protocol + windows / linux plugins
 │   ├── prompts/                          # system prompts (markdown)
-│   ├── runtime/                          # AppContext + orchestrator + interactivity
+│   ├── runtime/                          # AppContext + app_dirs + orchestrator
 │   ├── schemas/                          # Pydantic v2 cross-agent contracts
 │   ├── tools/                            # 7-Zip, IDA, BinDiff, PSF, Delta, manifest
 │   ├── patches/                          # CVE / KB / extraction pipeline
 │   └── graphs/                           # pipeline + four subgraphs
-├── db/                                   # Chroma + patch-store on disk
-├── reports/                              # human-readable reports
-├── _temp/                                # downloaded + extracted KBs
-└── logs/                                 # per-run JSON logs
+└── %APPDATA%/patchdiff-ai/               # per-user data root (created on first run)
+    ├── config.json                       # all settings; env vars override
+    ├── db/                                  # Chroma + patch-store on disk
+    ├── reports/                             # human-readable reports
+    ├── _temp/                               # downloaded + extracted KBs
+    ├── logs/                                # per-run JSON logs
+    └── windows_sxs/                         # per-platform WinSxS archives (build via `patchdiff-ai index`)
 ```
 
 ---
@@ -610,7 +668,7 @@ into `C:\Program Files\IDA *`. Re-run from an elevated PowerShell.
 
 **`No IDA install discovered under Program Files`.**
 Either install IDA Pro under one of `Program Files` / `Program Files (x86)`,
-or set `TOOLS__IDA=C:/path/to/idat.exe` in `.env`.
+or set `tools.ida` in `config.json` (or `TOOLS__IDA=C:/path/to/idat.exe` in env).
 
 **`No IDA 9.3 install found` — plugins skipped.**
 The bundled BinDiff/BinExport DLLs are pinned to 9.3's SDK ABI and won't
@@ -624,8 +682,9 @@ before any other tuning.
 
 **`No platforms configured` on first run.**
 The `windows_sxs/` archive tree isn't bundled (3 GB). Either add a Windows
-version via `python resources/index_winsxs.py ...`, or set
-`PATHS__RESOURCES_DIR=` to a directory that already has one built.
+version via `patchdiff-ai index <winsxs-dir> ...`, or set
+`paths.windows_sxs_dir` in `config.json` (or `PATHS__WINDOWS_SXS_DIR=...` in
+env) to point at a pre-built one.
 
 **Azure auth errors with no `AZURE_CLIENT_SECRET`.**
 The registry falls back to `DefaultAzureCredential`. Make sure `az login`

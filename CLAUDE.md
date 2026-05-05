@@ -50,11 +50,11 @@ patchdiff-ai -L debug cve CVE-2025-29824
 patchdiff-ai -L trace cve CVE-2025-29824
 ```
 
-There is **no automated test suite**. Verification is a parity smoke run against the old folder on `CVE-2025-29824` / `2025-Apr` (the canonical golden-reference). Logs are JSON to `logs/<unix>.<uuid>.log`; reports land in [reports/](reports/) and Chroma collection `windows.exe.rca.reports`.
+There is **no automated test suite**. Verification is a parity smoke run against the old folder on `CVE-2025-29824` / `2025-Apr` (the canonical golden-reference). All artifacts land under the per-user data root (`%APPDATA%/patchdiff-ai/` on Windows, `~/.local/share/patchdiff-ai/` elsewhere — see [runtime/app_dirs.py](src/patchdiff_ai/runtime/app_dirs.py)): logs at `<data_root>/logs/<unix>.<uuid>.log`, reports at `<data_root>/reports/`, Chroma at `<data_root>/db/`. Override the whole tree via `PATCHDIFF_AI_HOME=...` (handy for tests / CI sandboxes).
 
 ## External tools required at runtime
 
-Python 3.11 x64, IDA Pro 8.x or 9.x (idalib activated for the preferred path), BinDiff 8.0 + BinExport 12+, 7-Zip 22+. Paths are configured via `pydantic-settings` (no hardcoded paths in code). When `tools.ida` isn't set, [config/tools.py](src/patchdiff_ai/config/tools.py) auto-discovers installs under `Program Files`. The bundled BinDiff lives under [resources/bindiff_ida_9.3/](resources/bindiff_ida_9.3/) and is wired in via `BINDIFF_PATH` in `AppContext.build()`.
+Python 3.11 x64, IDA Pro 8.x or 9.x (idalib activated for the preferred path), BinDiff 8.0 + BinExport 12+, 7-Zip 22+. Paths are configured via `pydantic-settings` (no hardcoded paths in code). When `tools.ida` isn't set, [config/tools.py](src/patchdiff_ai/config/tools.py) auto-discovers installs under `Program Files`. The bundled BinDiff lives under [resources/bindiff_ida_9.3/](resources/bindiff_ida_9.3/) and is wired in via `BINDIFF_PATH` in `AppContext.build()`. `UpdateCompression.dll` lives at [resources/UpdateCompression.dll](resources/UpdateCompression.dll); `runtime/paths.py:BUNDLED_UPDATE_COMPRESSION_DLL` resolves both wheel (`<package>/_resources/...`) and source-tree layouts.
 
 ## Architecture cheat sheet
 
@@ -73,13 +73,13 @@ The chat REPL ([cli/chat.py](src/patchdiff_ai/cli/chat.py), [cli/chat_agent.py](
 ## Working on this codebase — locked-in technical decisions
 
 - **Pydantic v2 BaseModel** for state, settings, cross-agent contracts. Cross-node merging uses LangGraph reducers (`Annotated[list[T], append_list]`, `add_messages`).
-- **`pydantic-settings`** for config. Nested fields use `__` delimiter (`PATHS__DB_DIR`, `TOOLS__SEVEN_ZIP`, `CONCURRENCY__RE_WORKERS`). The per-purpose model overrides (`MODELS_DEFAULT`, `MODELS_GATHER_INFO`, …) are a deliberate **flat** exception via `Field(alias=...)`.
+- **`pydantic-settings`** for config, JSON-backed. Source order (highest first): explicit kwargs → env vars → `<data_root>/config.json` → defaults. Nested env fields use `__` delimiter (`PATHS__DB_DIR`, `TOOLS__SEVEN_ZIP`, `CONCURRENCY__RE_WORKERS`). The per-purpose model overrides (`MODELS_DEFAULT`, `MODELS_GATHER_INFO`, …) are a deliberate **flat** alias exception via `Field(alias=...)`. The starter `config.json` is auto-written by `AppContext.build()` on first run; users can also bootstrap explicitly with `patchdiff-ai init`.
 - **`AppContext` for DI** — built once in [cli/app.py](src/patchdiff_ai/cli/app.py)'s `main()`, threaded through every node / tool / command. **No module-level singletons, no `AgentModels`-style god-objects, no import-time `sys.exit(1)`.**
 - **structlog** for observability (JSON to disk, console renderer to stderr). `bind_cve(cve, run_id)` uses contextvars so every event auto-tags. `LLMMetricsHandler` emits per-call tokens / latency / cost.
 - **LangGraph kept as the orchestrator**; LangChain 1.x is the floor (`langchain.agents.create_agent` replaced the deprecated `langgraph.prebuilt.create_react_agent`).
 - **No `input()` inside graph nodes.** Interactivity lives in the CLI via LangGraph `interrupt()` → `CliInteractor.handle(...)` in [runtime/interactive.py](src/patchdiff_ai/runtime/interactive.py).
 - **Subprocess discipline.** Every external-tool wrapper is async, list-arg, and goes through [tools/process.py](src/patchdiff_ai/tools/process.py)'s `run()`: mandatory timeout, `create_subprocess_exec` (no `shell=True`), `ToolError` / `ToolTimeout`, Ctrl-C-clean cleanup.
-- **No external telemetry.** [cli/app.py](src/patchdiff_ai/cli/app.py)'s `_bootstrap()` force-pins `LANGCHAIN_TRACING_V2=false` / `LANGSMITH_TRACING=false` and strips inherited keys / endpoints **before** LangGraph imports (LangChain captures those at import time). Chroma's anonymous telemetry is disabled before `chromadb` imports. Everything stays in `logs/`.
+- **No external telemetry.** [cli/app.py](src/patchdiff_ai/cli/app.py)'s `_bootstrap()` force-pins `LANGCHAIN_TRACING_V2=false` / `LANGSMITH_TRACING=false` and strips inherited keys / endpoints **before** LangGraph imports (LangChain captures those at import time). Chroma's anonymous telemetry is disabled before `chromadb` imports. Everything stays in `<data_root>/logs/`.
 - **Dependency versions are frozen** in [pyproject.toml](pyproject.toml). Bump deliberately, not casually.
 
 ## Where to add things (smallest fitting seam first)

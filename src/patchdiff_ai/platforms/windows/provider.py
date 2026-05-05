@@ -70,8 +70,8 @@ class WindowsProvider(PlatformProvider):
             log.warning(
                 "no_platforms_configured",
                 manifest=str(manifest_path),
-                hint="Run `python resources/index_winsxs.py <winsxs_dir> "
-                     "--product-id <id> --slug <slug>` to add one.",
+                hint="Run `patchdiff-ai index <winsxs_dir> "
+                     "--product-name '...' --slug <slug>` to add one.",
             )
             return ()
 
@@ -177,7 +177,7 @@ class WindowsProvider(PlatformProvider):
         if not self.versions:
             raise RuntimeError(
                 "no Windows versions configured. Run "
-                "`python resources/index_winsxs.py` to add one."
+                "`patchdiff-ai index <winsxs_dir> --product-name '...' --slug ...` to add one."
             )
 
         if platform_id is None:
@@ -244,8 +244,8 @@ class WindowsProvider(PlatformProvider):
            produce a non-loadable plugin, so we refuse and tell the
            user to install IDA 9.3.
 
-        WinSxS archives still need to be built locally
-        (`resources/index_winsxs.py`) — too large to bundle.
+        WinSxS archives still need to be built locally via
+        `patchdiff-ai index ...` — too large to bundle.
         """
         from patchdiff_ai.cli.commands.install import (
             BUNDLED_PLUGIN_IDA_VERSION,
@@ -317,8 +317,9 @@ class WindowsProvider(PlatformProvider):
 
         # WinSxS archives are too large to bundle and must be built locally.
         click.echo(
-            "\n  WinSxS archives must be built locally — "
-            "see resources/index_winsxs.py for how to add a Windows version."
+            "\n  WinSxS archives must be built locally — run "
+            "`patchdiff-ai index <winsxs_dir> --product-name '...' --slug ...` "
+            "to add a Windows version."
         )
 
     def cli_group(self) -> click.Group:
