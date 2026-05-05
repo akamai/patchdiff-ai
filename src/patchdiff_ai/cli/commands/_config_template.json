@@ -33,7 +33,7 @@
   },
 
   "concurrency": {
-    "file_info_semaphore": 500,
+    "file_info_semaphore": 10,
     "re_workers": 12,
     "extractor_workers": 5,
     "llm_eval_parallel": 4,

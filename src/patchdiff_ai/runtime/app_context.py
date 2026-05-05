@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from patchdiff_ai.config.settings import Settings
 from patchdiff_ai.config.tools import IdaInstall, discover_ida_installs, select_ida_install
 from patchdiff_ai.llm.catalog import ModelPurpose
 from patchdiff_ai.llm.registry import ModelRegistry
@@ -25,6 +24,7 @@ from patchdiff_ai.tools.manifest import WcpManifestExtractor
 from patchdiff_ai.tools.seven_zip import SevenZipTool
 
 if TYPE_CHECKING:
+    from patchdiff_ai.config.settings import Settings
     from patchdiff_ai.platforms.base import Platform
     from patchdiff_ai.prompts.registry import PromptRegistry
 

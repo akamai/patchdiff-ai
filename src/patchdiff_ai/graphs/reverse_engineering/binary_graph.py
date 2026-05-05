@@ -16,14 +16,30 @@ agnostic.
 from __future__ import annotations
 
 from langgraph.graph import END, StateGraph
+from langgraph.types import RetryPolicy
 
 from patchdiff_ai.graphs.reverse_engineering.state import ReverseEngineeringState
 from patchdiff_ai.runtime.app_context import AppContext
+from patchdiff_ai.tools.idalib_pool import IdalibBinaryBusy
 
 
 class BinaryReNodes:
     ANALYZE = "Analyze binaries"
     DIFF_AND_DECOMPILE = "Diff and decompile"
+
+
+# When the IDB sidecars are held by another live IDA process, the pool
+# raises `IdalibBinaryBusy`. LangGraph's retry policy yields the task
+# back to the scheduler — other CVEs run during the backoff window, and
+# this one re-runs once the holder releases. 10 attempts × up to 30s ≈
+# 5 min worst case before the CVE actually fails.
+_BUSY_RETRY = RetryPolicy(
+    initial_interval=2.0,
+    backoff_factor=2.0,
+    max_interval=30.0,
+    max_attempts=10,
+    retry_on=IdalibBinaryBusy,
+)
 
 
 def build_binary_re_graph(ctx: AppContext):
@@ -36,10 +52,14 @@ def build_binary_re_graph(ctx: AppContext):
     analyze, diff_and_decompile = make_nodes(ctx)
 
     builder = StateGraph(ReverseEngineeringState)
-    builder.add_node(BinaryReNodes.ANALYZE, analyze)
+    builder.add_node(BinaryReNodes.ANALYZE, analyze, retry_policy=_BUSY_RETRY)
     # Diff + decompile is one node so the live BinDiff (sqlite3-backed,
     # not pickleable) never crosses a checkpoint boundary.
-    builder.add_node(BinaryReNodes.DIFF_AND_DECOMPILE, diff_and_decompile)
+    builder.add_node(
+        BinaryReNodes.DIFF_AND_DECOMPILE,
+        diff_and_decompile,
+        retry_policy=_BUSY_RETRY,
+    )
 
     builder.set_entry_point(BinaryReNodes.ANALYZE)
     builder.add_edge(BinaryReNodes.ANALYZE, BinaryReNodes.DIFF_AND_DECOMPILE)

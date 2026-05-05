@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "patchdiff-ai"
-version = "0.1.0"
+version = "2.0.13"
 description = "Turn a CVE ID into a binary-diff root-cause-analysis report — MSRC patches, IDA Pro + BinDiff, LLM-driven RE."
 readme = "readme.md"
 requires-python = ">=3.11"
@@ -66,6 +66,7 @@ dependencies = [
     "pydantic-settings==2.14.0",
     "python-bindiff==0.3.4",
     "python-binexport==0.4.2",
+    "python-dateutil==2.9.0.post0",
     "python-dotenv==1.2.2",
     "requests==2.33.1",
     "requests-html==0.10.0",
@@ -91,7 +92,7 @@ packages = ["src/patchdiff_ai"]
 # the dev layout (`resources/...`) stays intact; `runtime/paths.py`
 # checks both locations at runtime so editable installs hit the
 # source-tree copy. The 3 GB `windows_sxs/` tree is intentionally NOT
-# bundled — users build it locally via `patchdiff-ai index ...` into
+# bundled — users build it locally via `patchdiff-ai windows index ...` into
 # `<data_root>/windows_sxs/`.
 [tool.hatch.build.targets.wheel.force-include]
 "resources/bindiff_ida_9.3" = "patchdiff_ai/_resources/bindiff_ida_9.3"

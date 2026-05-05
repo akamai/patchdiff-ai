@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from datetime import datetime
 from functools import cached_property
 from pathlib import Path
 from typing import Any
 
 import click
 import structlog
+from dateutil.relativedelta import relativedelta
 
 from patchdiff_ai.config.settings import get_settings
 from patchdiff_ai.platforms.base import Platform, PlatformProvider
@@ -70,7 +72,7 @@ class WindowsProvider(PlatformProvider):
             log.warning(
                 "no_platforms_configured",
                 manifest=str(manifest_path),
-                hint="Run `patchdiff-ai index <winsxs_dir> "
+                hint="Run `patchdiff-ai windows index <winsxs_dir> "
                      "--product-name '...' --slug <slug>` to add one.",
             )
             return ()
@@ -177,7 +179,7 @@ class WindowsProvider(PlatformProvider):
         if not self.versions:
             raise RuntimeError(
                 "no Windows versions configured. Run "
-                "`patchdiff-ai index <winsxs_dir> --product-name '...' --slug ...` to add one."
+                "`patchdiff-ai windows index <winsxs_dir> --product-name '...' --slug ...` to add one."
             )
 
         if platform_id is None:
@@ -207,18 +209,22 @@ class WindowsProvider(PlatformProvider):
             if not (archive_ok and df_ok):
                 ok = False
 
+        # Probe the previous Patch Tuesday cycle relative to system time.
+        # Current month is unsafe early in the month: that month's CVRF
+        # isn't published until the 2nd Tuesday.
+        cvrf_tag = (datetime.now() - relativedelta(months=1)).strftime("%Y-%b")
         try:
             import requests
             res = requests.get(
-                "https://api.msrc.microsoft.com/cvrf/2025-Apr",
+                f"https://api.msrc.microsoft.com/cvrf/{cvrf_tag}",
                 headers={"Accept": "application/json"},
                 timeout=10,
             )
-            click.echo(f"  MSRC CVRF reachability     = {'OK' if res.status_code == 200 else f'rc={res.status_code}'}")
+            click.echo(f"  MSRC CVRF reachability     = {'OK' if res.status_code == 200 else f'rc={res.status_code}'} ({cvrf_tag})")
             if res.status_code != 200:
                 ok = False
         except Exception as exc:
-            click.echo(f"  MSRC CVRF reachability     = FAILED ({exc})")
+            click.echo(f"  MSRC CVRF reachability     = FAILED ({cvrf_tag}: {exc})")
             ok = False
 
         bindiff_path = os.environ.get("BINDIFF_PATH", "")
@@ -245,7 +251,7 @@ class WindowsProvider(PlatformProvider):
            user to install IDA 9.3.
 
         WinSxS archives still need to be built locally via
-        `patchdiff-ai index ...` — too large to bundle.
+        `patchdiff-ai windows index ...` — too large to bundle.
         """
         from patchdiff_ai.cli.commands.install import (
             BUNDLED_PLUGIN_IDA_VERSION,
@@ -318,7 +324,7 @@ class WindowsProvider(PlatformProvider):
         # WinSxS archives are too large to bundle and must be built locally.
         click.echo(
             "\n  WinSxS archives must be built locally — run "
-            "`patchdiff-ai index <winsxs_dir> --product-name '...' --slug ...` "
+            "`patchdiff-ai windows index <winsxs_dir> --product-name '...' --slug ...` "
             "to add a Windows version."
         )
 

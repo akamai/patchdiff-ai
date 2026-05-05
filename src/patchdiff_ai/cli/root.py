@@ -78,7 +78,6 @@ def build_root() -> click.Group:
     # so command modules only execute when their commands are dispatched.
     from patchdiff_ai.cli.commands.cve import cve_command
     from patchdiff_ai.cli.commands.health_check import health_check_command
-    from patchdiff_ai.cli.commands.index import index_command
     from patchdiff_ai.cli.commands.init import init_command
     from patchdiff_ai.cli.commands.install import install_group
 
@@ -86,7 +85,6 @@ def build_root() -> click.Group:
     root.add_command(cve_command)
     root.add_command(health_check_command)
     root.add_command(install_group)
-    root.add_command(index_command)
 
     # Mount each registered provider's Click group.
     for provider in providers():

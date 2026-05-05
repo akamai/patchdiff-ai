@@ -85,6 +85,16 @@ class CostTracker:
             )
         ]
 
+    def merge(self, other: "CostTracker") -> None:
+        """Fold another tracker's per-model totals into this one."""
+        for model, s in other._by_model.items():
+            mine = self._by_model[model]
+            mine.calls += s.calls
+            mine.prompt_tokens += s.prompt_tokens
+            mine.completion_tokens += s.completion_tokens
+            mine.total_tokens += s.total_tokens
+            mine.cost_usd += s.cost_usd
+
 
 _cost_tracker: ContextVar[CostTracker | None] = ContextVar(
     "_cost_tracker", default=None
@@ -97,13 +107,22 @@ def bind_cost_tracker() -> Iterator[CostTracker]:
 
     Sibling of `bind_phase_tracker` in `runtime/timer.py`; visible to
     any async task spawned inside via `_cost_tracker.get()`.
+
+    On exit, the bound tracker's totals are folded into the parent
+    tracker (if any) so nested binds aggregate cleanly: per-CVE binds
+    inside the orchestrator roll up into the session-level bind in
+    `cli/app.py:main()`, giving one global summary across single, batch,
+    and chat runs without duplicated per-call recording.
     """
+    parent = _cost_tracker.get()
     tracker = CostTracker()
     token = _cost_tracker.set(tracker)
     try:
         yield tracker
     finally:
         _cost_tracker.reset(token)
+        if parent is not None:
+            parent.merge(tracker)
 
 
 def get_cost_tracker() -> CostTracker | None:

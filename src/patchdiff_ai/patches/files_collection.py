@@ -3,8 +3,8 @@
 WinSxS used to be read off the host machine here. That code path is gone
 — the per-platform archives in `<data_root>/windows_sxs/` (one `.7z` +
 `.bin` per Windows release) are the only baseline source now. The
-indexing logic (`get_files`) is kept since the `patchdiff-ai index`
-command (see `cli/commands/index.py`) reuses it.
+indexing logic (`get_files`) is kept since the `patchdiff-ai windows index`
+command (see `platforms/windows/index.py`) reuses it.
 """
 
 from __future__ import annotations

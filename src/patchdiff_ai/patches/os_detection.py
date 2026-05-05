@@ -9,6 +9,7 @@ from typing import Mapping
 
 import requests
 import structlog
+from dateutil.relativedelta import relativedelta
 
 log = structlog.get_logger(__name__)
 
@@ -107,7 +108,7 @@ def is_int(value: str | int) -> bool:
 
 def get_cvrf_data(cvrf_id: str | None = None) -> dict:
     if cvrf_id is None:
-        cvrf_id = datetime.now().strftime("%Y-%b").upper()
+        cvrf_id = (datetime.now() - relativedelta(months=1)).strftime("%Y-%b").upper()
     url = f"https://api.msrc.microsoft.com/cvrf/v3.0/cvrf/{cvrf_id}"
     return requests.get(url, headers={"Accept": "application/json"}, timeout=30).json()
 

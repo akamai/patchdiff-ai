@@ -14,7 +14,7 @@ run `patchdiff-ai install` to bootstrap the remaining components (idalib + IDA
 | Windows 11 (ISO) | https://www.microsoft.com/en-gb/software-download/windows11 |
 
 The Windows ISOs are used to build a local WinSxS index via
-`patchdiff-ai index <winsxs-dir> --product-name "..." --slug ...` — they
+`patchdiff-ai windows index <winsxs-dir> --product-name "..." --slug ...` — they
 are not bundled because of size.
 
 IDA Pro 8.x or 9.x and BinDiff 8.0 + BinExport 12+ are also required at

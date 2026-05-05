@@ -124,18 +124,31 @@ def patch_entry(
         if winsxs_patch.is_empty():
             return base_entry, curr_entry, prev_entry
 
-        reverse_path = Path(winsxs_patch.item(0, column="path"))
-        primary_path = reverse_path.parents[1] / winsxs_patch.item(0, column="name")
+        # Two row shapes (see gather_info/nodes.py r_patch construction):
+        #   * delta_type == "r": path is `<component>/r/<file>`; the
+        #     materialized binary sits two levels up next to r/. The
+        #     r-delta bytes are needed for the "via baseline" fallback in
+        #     `_apply_forward`, so cache them alongside the staged base.
+        #   * delta_type IS NULL: vanilla WinSxS, the path itself is the
+        #     materialized baseline; no r-delta exists. _apply_forward's
+        #     "direct" path handles `r_delta_bytes=None`.
+        row = winsxs_patch.row(0, named=True)
+        if row.get("delta_type") == "r":
+            reverse_path = Path(row["path"])
+            primary_path = reverse_path.parents[1] / row["name"]
+            r_delta_bytes = reverse_path.read_bytes()
+        else:
+            primary_path = Path(row["path"])
+            r_delta_bytes = None
 
         base = primary_path.read_bytes()
-        r_delta_bytes = reverse_path.read_bytes()
 
         base_kb_path.mkdir(parents=True, exist_ok=True)
         (base_kb_path / entry["name"]).write_bytes(base)
-        r_delta_cache.write_bytes(r_delta_bytes)
-        log.debug("base_copied", name=entry["name"])
+        if r_delta_bytes is not None:
+            r_delta_cache.write_bytes(r_delta_bytes)
+        log.debug("base_copied", name=entry["name"], has_r_delta=r_delta_bytes is not None)
 
-        row = winsxs_patch.row(0, named=True)
         base_entry = PatchStoreEntry.from_row(row)
         base_entry.path = str(base_kb_path / entry["name"])
         base_entry.kb = base_kb

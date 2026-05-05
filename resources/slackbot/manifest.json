@@ -1,0 +1,63 @@
+{
+    "display_information": {
+        "name": "patchdiff-ai",
+        "description": "Binary-diff RCA for CVEs and Patch Tuesday cycles",
+        "background_color": "#1a1a2e"
+    },
+    "features": {
+        "bot_user": {
+            "display_name": "patchdiff-ai",
+            "always_online": false
+        },
+        "slash_commands": [
+            {
+                "command": "/health-check",
+                "description": "Check the patchdiff-ai environment is alive",
+                "should_escape": false
+            },
+            {
+                "command": "/get-report",
+                "description": "Fetch the cached RCA report for a CVE",
+                "usage_hint": "CVE-YYYY-NNNNN",
+                "should_escape": false
+            },
+            {
+                "command": "/analyze-cve",
+                "description": "Run patchdiff-ai analysis on a single CVE",
+                "usage_hint": "CVE-YYYY-NNNNN",
+                "should_escape": false
+            },
+            {
+                "command": "/analyze-month",
+                "description": "Run patchdiff-ai across a Patch Tuesday cycle",
+                "usage_hint": "YYYY-MMM (e.g. 2025-Apr)",
+                "should_escape": false
+            },
+            {
+                "command": "/month-stats",
+                "description": "Summary stats for an analyzed Patch Tuesday cycle",
+                "usage_hint": "YYYY-MMM (e.g. 2025-Apr)",
+                "should_escape": false
+            }
+        ]
+    },
+    "oauth_config": {
+        "scopes": {
+            "bot": [
+                "chat:write",
+                "commands",
+                "files:write"
+            ]
+        },
+        "pkce_enabled": false
+    },
+    "settings": {
+        "interactivity": {
+            "is_enabled": true
+        },
+        "org_deploy_enabled": false,
+        "socket_mode_enabled": true,
+        "token_rotation_enabled": false,
+        "is_mcp_enabled": false
+    }
+}

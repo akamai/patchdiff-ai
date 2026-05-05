@@ -41,6 +41,17 @@ class IdalibUnavailable(RuntimeError):
     """Idalib worker died, timed out, or refused to start."""
 
 
+class IdalibBinaryBusy(RuntimeError):
+    """The IDB sidecars are held by another live IDA process.
+
+    Raised by `_assign` when the cleanup probe cannot remove an existing
+    sidecar (typically `.id0` / `.id1`) because another process has the
+    file mmap'd. Callers (the RE node) should let this propagate — the
+    `RetryPolicy` on the node yields the task back to the LangGraph
+    scheduler, and the retry runs after the holder releases.
+    """
+
+
 class _Worker:
     """One spawned subprocess + its parent-side pipe.
 
@@ -307,8 +318,25 @@ class IdalibPool:
             wait_s=wait_s,
         )
 
-        # Clear stale lock sidecars from any prior crashed run.
-        _clean_idb_sidecars(binary)
+        # Clear stale lock sidecars from any prior crashed run. If any
+        # are held by a live process, yield instead of opening — nuking
+        # another IDA's sidecars corrupts its in-flight analysis.
+        locked = _clean_idb_sidecars(binary)
+        if locked:
+            self._bindings.pop(key, None)
+            if w.bound_path == binary.resolve():
+                w.bound_path = None
+            self._notify_worker_freed()
+            log.info(
+                "idalib_open_busy_yield",
+                binary=binary.name,
+                sidecar=locked[0].name,
+                worker=w.idx,
+            )
+            raise IdalibBinaryBusy(
+                f"{binary.name}: held by another IDA process "
+                f"(sidecar locked: {locked[0].name})"
+            )
 
         log.info("idalib_pool_open_start", binary=binary.name, worker=w.idx)
         open_t0 = time.perf_counter()
@@ -346,7 +374,24 @@ class IdalibPool:
                             path=str(idb),
                             error=str(unlink_exc),
                         )
-                    _clean_idb_sidecars(binary)
+                    # Same lock-aware cleanup — if a live holder appeared
+                    # mid-open, yield rather than corrupting its state.
+                    locked = _clean_idb_sidecars(binary)
+                    if locked:
+                        self._bindings.pop(key, None)
+                        w.bound_path = None
+                        self._notify_worker_freed()
+                        log.info(
+                            "idalib_open_busy_yield",
+                            binary=binary.name,
+                            sidecar=locked[0].name,
+                            worker=w.idx,
+                            mid_open=True,
+                        )
+                        raise IdalibBinaryBusy(
+                            f"{binary.name}: held by another IDA process "
+                            f"(sidecar locked mid-open: {locked[0].name})"
+                        ) from exc
         log.info(
             "idalib_pool_open_done",
             binary=binary.name,
@@ -541,13 +586,17 @@ class IdalibPool:
 # ----------------------------------------------------------- helpers
 
 
-def _clean_idb_sidecars(target: Path) -> None:
+def _clean_idb_sidecars(target: Path) -> list[Path]:
     """Remove stale lock sidecars next to `target`.
 
-    Unlink failures usually mean another process still has the file
-    mmap'd; the subsequent `idapro.open_database` will fail with a
-    clearer error.
+    Returns the list of sidecars that exist but could not be unlinked —
+    almost always because another live IDA process still has the file
+    mmap'd (Windows ERROR_SHARING_VIOLATION). Callers treat a non-empty
+    return as "binary is busy elsewhere" and yield instead of force-
+    opening; nuking another process's sidecars corrupts that process's
+    in-flight analysis.
     """
+    locked: list[Path] = []
     for ext in _IDB_LOCK_SUFFIXES:
         sibling = target.with_suffix(target.suffix + ext)
         if sibling.exists():
@@ -560,6 +609,8 @@ def _clean_idb_sidecars(target: Path) -> None:
                     path=str(sibling),
                     error=str(exc),
                 )
+                locked.append(sibling)
+    return locked
 
 
 def _short_kwargs(kwargs: dict[str, Any]) -> str:

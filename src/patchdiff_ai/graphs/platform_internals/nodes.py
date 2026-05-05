@@ -24,6 +24,7 @@ from patchdiff_ai.graphs.interrupts import (
 )
 from patchdiff_ai.graphs.platform_internals.state import PlatformInternalsState
 from patchdiff_ai.llm.catalog import ModelPurpose
+from patchdiff_ai.llm.retry import resilient
 from patchdiff_ai.observability.logging import write_raw_to_file
 from patchdiff_ai.prompts.registry import PromptId
 from patchdiff_ai.runtime.app_context import AppContext
@@ -102,7 +103,7 @@ def make_nodes(ctx: AppContext):
         llm = ctx.registry.for_purpose(ModelPurpose.PLATFORM_INTERNALS).model
 
         collect_prompt, _ = _prompts()
-        query_chain = collect_prompt | llm.with_structured_output(_Query)
+        query_chain = resilient(collect_prompt | llm.with_structured_output(_Query))
         meta_dict = _candidate_metadata(state)
         result: _Query = await query_chain.ainvoke(
             {"json_metadata": [HumanMessage(json.dumps(meta_dict))]}
@@ -127,7 +128,7 @@ def make_nodes(ctx: AppContext):
 
         llm = ctx.registry.for_purpose(ModelPurpose.DEFAULT).model
         _, rank_prompt = _prompts()
-        chain = rank_prompt | llm.with_structured_output(_FileScoreList)
+        chain = resilient(rank_prompt | llm.with_structured_output(_FileScoreList))
 
         files_text = "\n\n".join(
             f"name: {d.metadata.get('name', '')}\n{d.page_content}" for d, _ in state.docs

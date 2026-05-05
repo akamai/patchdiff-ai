@@ -180,7 +180,7 @@ pip install. To analyse a Windows version that isn't already registered in
 `<data_root>/windows_sxs/platforms.json`, build your own:
 
 ```powershell
-patchdiff-ai index <path-to-WinSxS> `
+patchdiff-ai windows index <path-to-WinSxS> `
     --product-name "Windows 11 Version 24H2" `
     --slug windows_11_24h2
 ```
@@ -655,7 +655,7 @@ patchdiff-ai/
     ├── reports/                             # human-readable reports
     ├── _temp/                               # downloaded + extracted KBs
     ├── logs/                                # per-run JSON logs
-    └── windows_sxs/                         # per-platform WinSxS archives (build via `patchdiff-ai index`)
+    └── windows_sxs/                         # per-platform WinSxS archives (build via `patchdiff-ai windows index`)
 ```
 
 ---
@@ -682,7 +682,7 @@ before any other tuning.
 
 **`No platforms configured` on first run.**
 The `windows_sxs/` archive tree isn't bundled (3 GB). Either add a Windows
-version via `patchdiff-ai index <winsxs-dir> ...`, or set
+version via `patchdiff-ai windows index <winsxs-dir> ...`, or set
 `paths.windows_sxs_dir` in `config.json` (or `PATHS__WINDOWS_SXS_DIR=...` in
 env) to point at a pre-built one.
 

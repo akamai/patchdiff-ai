@@ -129,7 +129,7 @@ class WinsxsArchive:
                 raise FileNotFoundError(
                     f"DataFrame missing for platform {self.spec.id!r}: "
                     f"{self.dataframe_path}. Run "
-                    f"`patchdiff-ai index <winsxs_dir> "
+                    f"`patchdiff-ai windows index <winsxs_dir> "
                     f"--product-ids {self.spec.primary_product_id} "
                     f"--slug {self.spec.slug}` to build it."
                 )

@@ -3,28 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-import threading
+import json
 import uuid
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 import structlog
 from langchain_core.documents import Document
-from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate
 from langchain_core.messages import SystemMessage
+from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate
 from langgraph.constants import Send
-from openai import RateLimitError
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-    wait_random,
-)
+from pydantic import BaseModel, Field, ValidationError
 
 from patchdiff_ai.platforms.windows.gather_info.state import GatherInfoState
 from patchdiff_ai.llm.catalog import ModelPurpose
+from patchdiff_ai.llm.retry import resilient
 from patchdiff_ai.patches.extractor import extract_kb, extraction_marker, load_delta_dlls
 from patchdiff_ai.patches.files_collection import (
     file_desc,
@@ -33,14 +28,35 @@ from patchdiff_ai.patches.files_collection import (
     get_update_dataframe,
 )
 from patchdiff_ai.patches.kb_downloader import download_kb
+from patchdiff_ai.prompts.registry import PromptId, PromptRegistry
 from patchdiff_ai.runtime.app_context import AppContext
 from patchdiff_ai.runtime.timer import Timer
 
 log = structlog.get_logger(__name__)
 
-# Global mutex used by `add_file_info` workers; reentrant so a single graph
-# execution doesn't deadlock against itself.
-_file_info_mutex = threading.RLock()
+# Files described per LLM call. ~15 keeps the structured-output response
+# well under any provider's output cap (15 × 80 tokens ≈ 1.2k completion)
+# while cutting request count by an order of magnitude vs. the legacy
+# one-call-per-file fan-out.
+BATCH_SIZE = 15
+
+# Per-`name` asyncio locks coalesce concurrent description requests for
+# the same file across batch CVE runs. The first batch holding the lock
+# pays the LLM call; later batches block on the lock, re-check the store
+# after release, and short-circuit. Coalescing is per-file even though
+# the LLM call is per-batch — different batches may overlap on names in
+# multi-CVE runs that share KB content.
+_file_info_locks: dict[str, asyncio.Lock] = {}
+_file_info_locks_guard = asyncio.Lock()
+
+
+async def _file_info_lock_for(name: str) -> asyncio.Lock:
+    async with _file_info_locks_guard:
+        lock = _file_info_locks.get(name)
+        if lock is None:
+            lock = asyncio.Lock()
+            _file_info_locks[name] = lock
+        return lock
 
 
 class GatherNodes:
@@ -50,18 +66,22 @@ class GatherNodes:
     UPDATE_VS = "Update vectorstore"
 
 
+class _FileDesc(BaseModel):
+    name: str
+    description: str = Field(description="One paragraph, max ~80 tokens.")
+
+
+class _FileDescBatch(BaseModel):
+    files: list[_FileDesc]
+
+
 def _build_desc_prompt() -> ChatPromptTemplate:
+    system = PromptRegistry.default().get(PromptId.WINDOWS_FILE_DESC)
     return ChatPromptTemplate(
-        input_variables=["filename", "package", "description"],
+        input_variables=["files"],
         messages=[
-            SystemMessage("You are a senior Windows-internals analyst"),
-            HumanMessagePromptTemplate.from_template(
-                "Write a maximum of 80 token unformatted paragraph about the Windows executable "
-                "{filename} package: {package} description: {description}. Include only "
-                "technical details about its purpose in the system. Keep it short, consistent, "
-                "and strictly one paragraph. Do not repeat facts. Omit headings, bullets, and "
-                "conjunctions; the output is for embedding context."
-            ),
+            SystemMessage(system),
+            HumanMessagePromptTemplate.from_template("{files}"),
         ],
     )
 
@@ -69,26 +89,6 @@ def _build_desc_prompt() -> ChatPromptTemplate:
 def make_nodes(ctx: AppContext):
     desc_prompt = _build_desc_prompt()
     semaphore = asyncio.Semaphore(ctx.settings.concurrency.file_info_semaphore)
-
-    def _log_rate_limit_retry(retry_state) -> None:
-        sleep_s = getattr(retry_state.next_action, "sleep", None)
-        log.warning(
-            "llm_rate_limited",
-            attempt=retry_state.attempt_number,
-            sleep_s=round(sleep_s, 1) if sleep_s is not None else None,
-        )
-
-    @retry(
-        stop=stop_after_attempt(20),
-        wait=wait_exponential(multiplier=5, min=5, max=120) + wait_random(0, 10),
-        retry=retry_if_exception_type(RateLimitError),
-        before_sleep=_log_rate_limit_retry,
-        reraise=True,
-    )
-    async def _invoke_desc(chain, name: str, package: str, description: str):
-        return await chain.ainvoke(
-            {"filename": name, "package": package, "description": description}
-        )
 
     async def download(state: GatherInfoState) -> dict[str, Any]:
         log.info(
@@ -162,18 +162,34 @@ def make_nodes(ctx: AppContext):
 
         winsxs_df = winsxs_df.filter(filter_executables) if not winsxs_df.is_empty() else winsxs_df
 
-        # Multi-version dedupe: a bundled WinSxS archive can carry several
-        # patch levels of the same component (e.g. 26100.1 / .712 / .1591).
-        # Microsoft only writes a complete reverse-delta chain (back to
-        # RTM) on the LATEST version's `r/` file; intermediate versions
-        # carry one-step deltas that recursive_apply can't unwind to the
-        # MSU's expected source. Pick the highest version per component
-        # so `winsxs_patch.item(0, ...)` in delta_apply is deterministic
-        # and points at the row whose r-delta reaches RTM.
+        # Per-component dedupe: pick the row that delta_apply will treat
+        # as "the baseline".
+        #
+        # Two valid baseline shapes:
+        #   * `delta_type == "r"` — updated WinSxS, reverse-delta chain
+        #     reaches RTM. Microsoft only writes a complete chain on the
+        #     LATEST version's `r/` file; intermediate versions carry
+        #     one-step deltas that recursive_apply can't unwind. Pick the
+        #     highest-version r-row per component so `winsxs_patch.item(0,
+        #     ...)` in delta_apply is deterministic.
+        #   * `delta_type is null` — vanilla / never-CU'd WinSxS. The
+        #     materialized `<component>/<file>` IS the baseline (RTM); no
+        #     r-delta exists and `_apply_forward` succeeds via its
+        #     "direct" path with `r_delta_bytes=None`.
+        #
+        # When both shapes exist for the same `(name, package, arch,
+        # pubkey)` (mixed/partially-updated dump), prefer the r-row — it
+        # carries the rollback chain. The `_is_flat` priority column +
+        # `unique(keep="first")` enforces that.
         r_patch = (
-            winsxs_df.filter(pl.col("arch").eq(arch) & pl.col("delta_type").eq("r"))
-            .sort("version", descending=True)
+            winsxs_df.filter(
+                pl.col("arch").eq(arch)
+                & (pl.col("delta_type").eq("r") | pl.col("delta_type").is_null())
+            )
+            .with_columns(pl.col("delta_type").is_null().alias("_is_flat"))
+            .sort(["_is_flat", "version"], descending=[False, True])
             .unique(subset=["name", "package", "arch", "pubkey"], keep="first")
+            .drop("_is_flat")
             if not winsxs_df.is_empty() else winsxs_df
         )
 
@@ -238,61 +254,151 @@ def make_nodes(ctx: AppContext):
             ),
         }
 
-    async def add_file_info(args: tuple[Path, str, str]) -> dict[str, Any]:
-        base, name, package = args
+    async def add_file_info(batch: list[tuple[str, str, str]]) -> dict[str, Any]:
+        """Describe a batch of files in one structured-output LLM call.
+
+        `batch` is a list of `(base_path_str, name, package)` tuples.
+        Path is serialized as a string because LangGraph's `Send` payload
+        must be JSON-serializable for checkpoint/replay parity.
+        """
+        if not batch:
+            return {}
         stores = ctx.open_vector_stores()
 
-        with _file_info_mutex:
-            async with semaphore:
-                res = stores.file_info.get(
-                    where={"$and": [{"name": name}, {"package": package}]}
-                )
-                if res.get("ids"):
-                    return {}
+        names = [name for _, name, _ in batch]
 
-                desc = (file_desc(base) if base.exists() else None) or "_"
-                model = ctx.registry.for_purpose(ModelPurpose.GATHER_INFO).model
-                chain = desc_prompt | model
-                result = await _invoke_desc(chain, name, package, desc)
+        # Acquire per-name locks in sorted order to avoid deadlocks when
+        # two batches in flight share names. Coalesces duplicate LLM
+        # spend across multi-CVE runs that share KB content.
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(semaphore)
+            for name in sorted(set(names)):
+                lock = await _file_info_lock_for(name)
+                await stack.enter_async_context(lock)
 
-                doc = Document(
-                    page_content=getattr(result, "content", "") or "",
-                    metadata={
-                        "name": name.lower(),
-                        "package": package.lower(),
-                        "description": desc.lower(),
-                    },
-                )
-                await stores.file_info.aadd_documents(documents=[doc], ids=[str(uuid.uuid4())])
+            # Bulk dedup once we hold all locks. A concurrent batch may
+            # have just persisted some of these names while we were
+            # blocked on the lock; recheck after acquiring.
+            existing = stores.file_info.get(where={"name": {"$in": names}})
+            already: set[str] = {
+                md["name"]
+                for md in (existing.get("metadatas") or [])
+                if md.get("name")
+            }
+            pending = [(p, n, pkg) for p, n, pkg in batch if n not in already]
+            if not pending:
                 return {}
+
+            # Build per-file inputs — read PE FileDescription synchronously,
+            # cheap relative to the LLM call.
+            items: list[dict[str, str]] = []
+            desc_by_name: dict[str, str] = {}
+            for path_str, name, package in pending:
+                base = Path(path_str)
+                desc = (file_desc(base) if base.exists() else None) or "_"
+                desc_by_name[name] = desc
+                items.append({"filename": name, "package": package, "description": desc})
+
+            # Lower temperature for embedding-input stability — same input
+            # across runs should yield near-identical descriptions, otherwise
+            # cross-batch style drift muddies the vector index. `model_copy`
+            # returns a fresh instance so the registry-cached model is not
+            # mutated.
+            model = ctx.registry.for_purpose(ModelPurpose.GATHER_INFO).model.model_copy(
+                update={"temperature": 0.2}
+            )
+            chain = resilient(desc_prompt | model.with_structured_output(_FileDescBatch))
+
+            try:
+                result: _FileDescBatch = await chain.ainvoke(
+                    {"files": json.dumps({"files": items})}
+                )
+            except (ValidationError, ValueError) as exc:
+                # Best-effort: drop the whole batch on a structured-output
+                # parse failure. Names re-emit on the next run via the
+                # routing dedup at `add_file_info_if_needed`.
+                log.warning(
+                    "add_file_info_batch_failed",
+                    error=str(exc)[:200],
+                    names=names,
+                )
+                return {}
+
+            # Map LLM output back to inputs by name. Anything the model
+            # silently dropped will get a fresh attempt next run.
+            by_name: dict[str, str] = {fd.name.lower(): fd.description for fd in result.files}
+            docs: list[Document] = []
+            ids: list[str] = []
+            for path_str, name, package in pending:
+                content = by_name.get(name.lower())
+                if not content:
+                    continue
+                docs.append(
+                    Document(
+                        page_content=content,
+                        metadata={
+                            "name": name.lower(),
+                            # `package` recorded for traceability; not
+                            # part of the dedup key.
+                            "package": package.lower(),
+                            "description": desc_by_name[name].lower(),
+                        },
+                    )
+                )
+                ids.append(str(uuid.uuid4()))
+
+            if docs:
+                await stores.file_info.aadd_documents(documents=docs, ids=ids)
+            log.info(
+                "add_file_info_batch",
+                requested=len(pending),
+                persisted=len(docs),
+                skipped_existing=len(batch) - len(pending),
+            )
+            return {}
 
     def add_file_info_if_needed(state: GatherInfoState):
         stores = ctx.open_vector_stores()
-        update_set: set[tuple[str, str]] = set()
-        exists_set: set[tuple[str, str]] = set()
 
         base_df = state.filtered_dataframes.base
         if base_df is None or base_df.is_empty():
             return GatherNodes.UPDATE_VS
 
-        for row in base_df.unique(subset=["name", "package"]).iter_rows(named=True):
-            update_set.add((row["name"], row["package"]))
+        # Dedup key is `name` only: descriptions are filename-driven and
+        # the LLM output isn't differentiated by `package`. Coalescing
+        # cuts duplicate LLM spend across batch CVEs that share files.
+        update_set: set[str] = {
+            row["name"]
+            for row in base_df.unique(subset=["name"]).iter_rows(named=True)
+        }
 
         existing = stores.file_info.get()
-        for metadata in existing.get("metadatas") or []:
-            exists_set.add((metadata["name"], metadata["package"]))
+        exists_set: set[str] = {
+            md["name"] for md in (existing.get("metadatas") or []) if md.get("name")
+        }
 
-        update_set = update_set - exists_set
+        update_set -= exists_set
         if not update_set:
             return GatherNodes.UPDATE_VS
 
-        sends = []
-        for row in base_df.unique(subset=["name", "package"]).iter_rows(named=True):
-            if (row["name"], row["package"]) in update_set:
-                base_path = Path(row["path"]).parents[1] / row["name"]
-                sends.append(
-                    Send(GatherNodes.ADD_FILE_INFO, (base_path, row["name"], row["package"]))
-                )
+        pending: list[tuple[str, str, str]] = []
+        for row in base_df.unique(subset=["name"]).iter_rows(named=True):
+            if row["name"] not in update_set:
+                continue
+            # r-row path is `<component>/r/<file>`; the materialized
+            # binary lives two levels up next to r/. Flat row path IS
+            # the materialized binary (vanilla WinSxS, no r/f/n).
+            row_path = Path(row["path"])
+            if row.get("delta_type") == "r":
+                base_path = row_path.parents[1] / row["name"]
+            else:
+                base_path = row_path
+            pending.append((str(base_path), row["name"], row["package"]))
+
+        sends = [
+            Send(GatherNodes.ADD_FILE_INFO, pending[i:i + BATCH_SIZE])
+            for i in range(0, len(pending), BATCH_SIZE)
+        ]
         return sends or GatherNodes.UPDATE_VS
 
     async def update_vector_store(state: GatherInfoState) -> dict[str, Any]:

@@ -3,20 +3,14 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import click
 
 from patchdiff_ai.cli.validators import cve_value
 from patchdiff_ai.config.settings import get_settings
+from patchdiff_ai.platforms.windows.cycle import normalize_month
 from patchdiff_ai.runtime.app_context import AppContext
-
-
-_MONTH_RE = re.compile(
-    r"^\d{4}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$",
-    re.IGNORECASE,
-)
 
 
 def _validate_cve(ctx: click.Context, param: click.Parameter, value: str) -> str:
@@ -28,12 +22,10 @@ def _validate_cve(ctx: click.Context, param: click.Parameter, value: str) -> str
 def _validate_month(ctx: click.Context, param: click.Parameter, value: str) -> str:
     if not value:
         return value
-    if not _MONTH_RE.match(value):
-        raise click.BadParameter(
-            "Invalid month format; expected YYYY-MMM (e.g. 2025-Jul)"
-        )
-    year, mon = value.split("-")
-    return f"{year}-{mon.capitalize()}"
+    try:
+        return normalize_month(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc))
 
 
 def _platform_ids(value: str | None) -> set[str]:

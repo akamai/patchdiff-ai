@@ -9,12 +9,11 @@ Replaces:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from patchdiff_ai.config.credentials import AnthropicCreds, AzureCreds, GeminiCreds
-from patchdiff_ai.config.settings import Settings
 from patchdiff_ai.llm.auth import (
     AzureAuthError,
     build_azure_credential,
@@ -31,6 +30,9 @@ from patchdiff_ai.llm.catalog import (
 from patchdiff_ai.llm.providers.anthropic import build_anthropic_chat
 from patchdiff_ai.llm.providers.azure import build_azure_chat, build_azure_embeddings
 from patchdiff_ai.llm.providers.gemini import build_gemini_chat
+
+if TYPE_CHECKING:
+    from patchdiff_ai.config.settings import Settings
 
 log = structlog.get_logger(__name__)
 
