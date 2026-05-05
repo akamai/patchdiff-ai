@@ -29,14 +29,23 @@ superset of the query; an interactive numbered menu lets multiple SKUs
 share one entry. The first selected entry becomes the
 ``primary_product_id``. Pass ``--product-ids`` to skip the prompt.
 
-Idempotent: re-running on the same folder overwrites the .bin / .7z and
-re-deletes any non-executables that crept back.
+**Non-destructive on the source.** The user's input folder is never
+modified. Every run first copies ``winsxs_path`` into
+``<windows_sxs_dir>/<slug>/`` (the "working copy"), and all subsequent
+work — indexing, non-exec cleanup, optional compression — operates on
+that copy. In archive mode the working copy is removed after
+compression, leaving only the ``.7z``. In directory mode the working
+copy is what the manifest entry points at.
+
+Idempotent: a stale working copy from a prior run is replaced before
+the new copy is staged.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -201,6 +210,45 @@ def _resolve_product_ids(query: str, msrc_month: str) -> tuple[int, list[int]]:
     return primary_id, all_ids
 
 
+def _prepare_working_copy(source: Path, target: Path) -> None:
+    """Replace ``target`` with a fresh copy of ``source``.
+
+    The source folder is treated as immutable; every mutation (index
+    cleanup, 7-zip compression) operates on this copy instead. Refuses
+    degenerate layouts up front:
+
+    * ``source == target`` — operating in place would mutate the user's
+      source. Tell them to pick a different ``--slug`` or move the
+      source elsewhere.
+    * ``target`` inside ``source`` — ``shutil.copytree`` would recurse
+      forever. Easy to hit if ``windows_sxs_dir`` is misconfigured under
+      the source tree.
+    """
+    src_r = source.resolve()
+    tgt_r = target.resolve()
+    if src_r == tgt_r:
+        raise click.ClickException(
+            f"source path {source} is the same as the working location "
+            f"{target}. Pick a different --slug, or move the source "
+            f"outside windows_sxs_dir — the indexer must not modify your source."
+        )
+    if tgt_r.is_relative_to(src_r):
+        raise click.ClickException(
+            f"working location {target} is inside the source path "
+            f"{source}; copying would recurse. Move the source or set "
+            f"`paths.windows_sxs_dir` outside it."
+        )
+
+    if target.exists():
+        click.echo(f"[*] removing stale working copy at {target}")
+        shutil.rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    click.echo(f"[*] copying {source} -> {target} (this may take a while) ...")
+    t0 = time.perf_counter()
+    shutil.copytree(source, target)
+    click.echo(f"[+] copied in {time.perf_counter() - t0:.1f}s")
+
+
 def _compress(seven_zip: Path, archive: Path, winsxs_root: Path) -> None:
     """Run 7z to compress ``winsxs_root`` into ``archive``. The archive
     layout matches the relative paths in the DataFrame (we cd into the
@@ -354,17 +402,26 @@ def index_command(
     bin_path = out_dir / bin_name
     manifest_path = out_dir / "platforms.json"
 
-    click.echo(f"[*] indexing {winsxs_root} ...")
+    # Stage a copy of the source under <windows_sxs_dir>/<slug>/ before
+    # touching anything. Everything below operates on the copy; the
+    # user's source path is never modified.
+    working_dir = out_dir / slug
+    _prepare_working_copy(winsxs_root, working_dir)
+
+    click.echo(f"[*] indexing {working_dir} ...")
     t0 = time.perf_counter()
-    df = _index(winsxs_root)
+    df = _index(working_dir)
     click.echo(f"[*] indexed {len(df)} files in {time.perf_counter() - t0:.1f}s")
     if df.is_empty():
+        # Working copy is owned by us — clean it up so a failed run
+        # doesn't leave half-staged artifacts under windows_sxs_dir.
+        shutil.rmtree(working_dir, ignore_errors=True)
         raise click.ClickException("no files matched the WinSxS component-name regex; aborting.")
 
-    # Filter to executables for the persisted DataFrame. In archive mode
-    # the .7z is compressed AFTER the source dir is pruned, so its
-    # contents match. In directory mode the live folder is pruned in
-    # place — same end state.
+    # Filter to executables for the persisted DataFrame. The cleanup
+    # below shrinks the working copy to match (and the .7z, in archive
+    # mode, is compressed from that pruned copy) — same end state for
+    # both modes.
     exec_df = df.filter(
         pl.any_horizontal([
             pl.col("name").str.to_lowercase().str.ends_with(ext)
@@ -380,29 +437,26 @@ def index_command(
     click.echo(f"[+] wrote DataFrame -> {bin_path}")
 
     if not keep_non_executables:
-        click.echo("[*] deleting non-executables from the source dir ...")
-        freed = _cleanup_non_executables(winsxs_root)
+        click.echo("[*] deleting non-executables from the working copy ...")
+        freed = _cleanup_non_executables(working_dir)
         click.echo(f"[+] freed {freed // (1024 * 1024)} MB")
 
     if archive_type == "archive":
         archive_field = f"{product_id}.{slug}.7z"
         archive_path = out_dir / archive_field
         click.echo(f"[*] compressing with {seven_zip} -> {archive_path}")
-        _compress(Path(seven_zip), archive_path, winsxs_root)
+        _compress(Path(seven_zip), archive_path, working_dir)
         archive_size_mb = archive_path.stat().st_size // (1024 * 1024)
         click.echo(f"[+] archive ready: {archive_path} ({archive_size_mb} MB)")
+        click.echo(f"[*] removing working copy at {working_dir}")
+        shutil.rmtree(working_dir)
     else:
-        # Manifest stores a relative path when the source lives under
-        # windows_sxs_dir (so moving the data root keeps things working);
-        # otherwise an absolute path. `Path("/manifest_dir") / "/abs"`
-        # returns the absolute right-hand side, so both forms resolve
-        # correctly via the `archive_dir / spec.archive` join in
-        # `WinsxsArchive.__init__`.
-        try:
-            archive_field = str(winsxs_root.relative_to(out_dir)).replace("\\", "/")
-        except ValueError:
-            archive_field = str(winsxs_root)
-        click.echo(f"[+] directory entry: {archive_field}")
+        # The working copy IS the persisted artifact. Always at
+        # <windows_sxs_dir>/<slug>/, so the manifest stores `<slug>` as
+        # a relative-to-windows_sxs_dir path — `archive_dir / spec.archive`
+        # in `WinsxsArchive.__init__` resolves it correctly.
+        archive_field = slug
+        click.echo(f"[+] directory entry kept at {working_dir}")
 
     _update_manifest(
         manifest_path,
