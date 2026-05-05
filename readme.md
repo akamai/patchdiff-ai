@@ -77,7 +77,7 @@ LLM-driven supervisor. Every routing decision is a pure function of state.
 
 ```powershell
 # Install directly from GitHub (Windows PowerShell, Python 3.11+ x64)
-pip install git+https://github.com/maor-da/patchdiff-ai
+pip install git+https://github.com/akamai/patchdiff-ai
 
 # Set up Azure OpenAI credentials in a .env file in your working dir,
 # then validate the install end-to-end
@@ -127,7 +127,7 @@ are supported as eval / fallback. See [Configuration](#configuration).
 ### From GitHub (recommended for end users)
 
 ```powershell
-pip install git+https://github.com/maor-da/patchdiff-ai
+pip install git+https://github.com/akamai/patchdiff-ai
 ```
 
 The wheel ships the bundled BinDiff/BinExport DLLs (~9.5 MB) under
@@ -137,7 +137,7 @@ can copy them into your IDA 9.3 `plugins/` folder without extra downloads.
 ### From source (for development)
 
 ```powershell
-git clone https://github.com/maor-da/patchdiff-ai
+git clone https://github.com/akamai/patchdiff-ai
 cd patchdiff-ai
 
 python -m venv .venv
@@ -635,8 +635,13 @@ worked and your account has `Cognitive Services User` on the resource.
 
 ## License
 
-Copyright 2025 Akamai Technologies Inc.
+**`patchdiff-ai windows install` fails with permission errors.**
+You're not running elevated. The wheel install + plugin copy both write
+into `C:\Program Files\IDA *`. Re-run from an elevated PowerShell.
 
-This software is distributed under the terms set out in the project's
-LICENSE file. By using or distributing this software you agree to those
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
+
+>http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 terms.

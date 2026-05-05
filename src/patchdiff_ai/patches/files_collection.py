@@ -108,7 +108,10 @@ def generate_df(
         # cheap relative to the per-file parsing inside get_files.
         paths = list(paths)
         progress.set_total(len(paths))
-    return pl.DataFrame(get_files(kb, paths, collect_hash, progress=progress))
+    return pl.DataFrame(
+        get_files(kb, paths, collect_hash, progress=progress),
+        schema_overrides={"delta_type": pl.Utf8, "hash": pl.Utf8},
+    )
 
 
 async def get_update_dataframe(

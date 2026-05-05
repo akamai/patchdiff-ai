@@ -112,7 +112,7 @@ def _index(winsxs_root: Path) -> pl.DataFrame:
     rows = get_files("winsxs", paths, collect_hash=False)
     if not rows:
         return pl.DataFrame()
-    df = pl.DataFrame(rows)
+    df = pl.DataFrame(rows, schema_overrides={"delta_type": pl.Utf8, "hash": pl.Utf8})
     # Rewrite absolute paths to in-archive relative paths.
     root_str = str(winsxs_root.resolve())
     df = df.with_columns(
@@ -400,7 +400,8 @@ def main() -> int:
             print(f"[!] {exc}", file=sys.stderr)
             return 3
 
-    out_dir = winsxs_root.parent
+    out_dir = Path(__file__).resolve().parent / "windows_sxs"
+    out_dir.mkdir(parents=True, exist_ok=True)
     bin_name = f"{product_id}.{args.slug}.bin"
     archive_name = f"{product_id}.{args.slug}.7z"
     bin_path = out_dir / bin_name
