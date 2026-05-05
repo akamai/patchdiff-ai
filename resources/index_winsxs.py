@@ -2,19 +2,19 @@
 
 The patchdiff-ai pipeline used to read its baseline binaries straight off
 `C:\\Windows\\WinSxS` on the host. This script replaces that with a
-self-contained output: hand it a WinSxS folder (typically extracted from
+self-contained archive: hand it a WinSxS folder (typically extracted from
 a Windows install ISO) and it produces:
 
   * ``{product_id}.{slug}.bin`` — polars DataFrame indexing every
-    executable in the WinSxS dump (path is relative to the output root).
-  * ``{product_id}.{slug}/`` (default) — directory containing only the
-    executables, moved from the source. Fast (same-volume rename).
-  * ``{product_id}.{slug}.7z`` (with ``--archive``) — 7-zip archive
-    containing the executables. Slower but more compact.
+    executable in the WinSxS dump (path is relative to the archive root).
+  * ``{product_id}.{slug}.7z``  — 7-zip archive containing only the
+    executables. Non-executables are deleted from the source folder
+    (destructive in-place) before compression to save storage.
 
-The output files are written to ``resources/windows_sxs/`` (next to this
-script). The ``platforms.json`` manifest in that dir is created/updated
-to register the new platform.
+The output files are written next to the *parent* of the input WinSxS
+folder, e.g. running this on ``resources/windows_sxs/windows_server_2025/``
+puts them in ``resources/windows_sxs/``. The ``platforms.json`` manifest
+in that same dir is created/updated to register the new platform.
 
 Usage:
 
@@ -23,11 +23,10 @@ Usage:
         --slug windows_11_24h2 \\
         [--msrc-month 2026-Apr]      # default: current month
         [--product-ids 12390,12391]   # skip the interactive pick
-        [--archive]                  # produce .7z instead of directory
         [--seven-zip C:/Path/to/7z.exe] \\
-        [--keep-non-executables]     # skip the destructive cleanup (archive mode only)
+        [--keep-non-executables]     # skip the destructive cleanup
 
-The MSRC ``productId``(s) are resolved by tokenising ``--product-name`` and
+The MSRC `productId`(s) are resolved by tokenising ``--product-name`` and
 finding every product in the monthly CVRF whose name is a token-superset
 of the query. The script then presents an interactive numbered menu so
 multiple SKUs (e.g. x64 + ARM64 + 32-bit + Server siblings sharing the
@@ -36,11 +35,10 @@ selected entry becomes the ``primary_product_id``; the full set is
 written to ``msrc_product_ids`` in ``platforms.json``. Pass
 ``--product-ids`` (comma-separated, primary first) to bypass the prompt.
 
-Idempotent: re-running on the same folder overwrites the .bin and output,
-and in directory mode re-moves any files that reappeared. The script can
-run inside the project's venv (it imports ``patchdiff_ai`` for the indexing
-logic) or standalone with PyPI-installed deps (polars + the 7-zip
-executable).
+Idempotent: re-running on the same folder overwrites the .bin and .7z and
+re-deletes any non-executables that crept back. The script can run inside
+the project's venv (it imports ``patchdiff_ai`` for the indexing logic) or
+standalone with PyPI-installed deps (polars + the 7-zip executable).
 """
 
 from __future__ import annotations
@@ -114,7 +112,7 @@ def _index(winsxs_root: Path) -> pl.DataFrame:
     rows = get_files("winsxs", paths, collect_hash=False)
     if not rows:
         return pl.DataFrame()
-    df = pl.DataFrame(rows, schema_overrides={"delta_type": pl.Utf8, "hash": pl.Utf8})
+    df = pl.DataFrame(rows)
     # Rewrite absolute paths to in-archive relative paths.
     root_str = str(winsxs_root.resolve())
     df = df.with_columns(
@@ -124,25 +122,6 @@ def _index(winsxs_root: Path) -> pl.DataFrame:
         )
     )
     return df
-
-
-def _move_executables(winsxs_root: Path, dest_dir: Path, exec_df: pl.DataFrame) -> int:
-    """Move executable files listed in `exec_df` from `winsxs_root` into
-    `dest_dir`, preserving relative paths. Returns the count of files moved.
-    Idempotent: skips files that already exist at the destination."""
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    moved = 0
-    for rel_path in exec_df["path"].to_list():
-        src = winsxs_root / rel_path
-        dst = dest_dir / rel_path
-        if dst.exists():
-            continue
-        if not src.exists():
-            continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dst))
-        moved += 1
-    return moved
 
 
 def _cleanup_non_executables(winsxs_root: Path) -> int:
@@ -324,7 +303,6 @@ def _update_manifest(
     dataframe_name: str,
     product_name: str | None,
     msrc_month: str | None = None,
-    mode: str = "archive",
 ) -> None:
     """Insert/update an entry in `platforms.json`. Creates the file with a
     skeleton if missing."""
@@ -338,7 +316,6 @@ def _update_manifest(
         "id": slug,
         "primary_product_id": product_id,
         "slug": slug,
-        "type": mode,
         "archive": archive_name,
         "dataframe": dataframe_name,
         # Full set of MSRC product IDs that map to this archive — picked
@@ -390,11 +367,10 @@ def main() -> int:
                              "Skips the interactive pick when set.")
     parser.add_argument("--seven-zip", type=Path, default=None,
                         help="Override the 7-Zip executable path.")
-    parser.add_argument("--archive", action="store_true",
-                        help="Produce a .7z archive instead of a directory. "
-                             "Slower but more compact.")
     parser.add_argument("--keep-non-executables", action="store_true",
-                        help="Skip the destructive cleanup (archive mode only).")
+                        help="Skip the destructive cleanup. Useful for a "
+                             "dry run when you want to re-index without "
+                             "modifying the source dir.")
     args = parser.parse_args()
 
     winsxs_root: Path = args.winsxs_path.resolve()
@@ -424,15 +400,11 @@ def main() -> int:
             print(f"[!] {exc}", file=sys.stderr)
             return 3
 
-    out_dir = Path(__file__).resolve().parent / "windows_sxs"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = winsxs_root.parent
     bin_name = f"{product_id}.{args.slug}.bin"
-    if args.archive:
-        dest_name = f"{product_id}.{args.slug}.7z"
-    else:
-        dest_name = f"{product_id}.{args.slug}"
+    archive_name = f"{product_id}.{args.slug}.7z"
     bin_path = out_dir / bin_name
-    dest_path = out_dir / dest_name
+    archive_path = out_dir / archive_name
     manifest_path = out_dir / "platforms.json"
 
     print(f"[*] indexing {winsxs_root} ...")
@@ -458,39 +430,26 @@ def main() -> int:
     safe_serialize(exec_df, bin_path)
     print(f"[+] wrote DataFrame -> {bin_path}")
 
-    if args.archive:
-        # --- archive mode: cleanup + compress into .7z ----------------------
-        if not args.keep_non_executables:
-            print("[*] deleting non-executables from the source dir ...")
-            freed = _cleanup_non_executables(winsxs_root)
-            print(f"[+] freed {freed // (1024 * 1024)} MB")
+    if not args.keep_non_executables:
+        print("[*] deleting non-executables from the source dir ...")
+        freed = _cleanup_non_executables(winsxs_root)
+        print(f"[+] freed {freed // (1024 * 1024)} MB")
 
-        seven_zip = _resolve_seven_zip(args.seven_zip)
-        print(f"[*] compressing with {seven_zip} -> {dest_path}")
-        _compress(seven_zip, dest_path, winsxs_root)
-        dest_size_mb = dest_path.stat().st_size // (1024 * 1024)
-        print(f"[+] archive ready: {dest_path} ({dest_size_mb} MB)")
-    else:
-        # --- directory mode: move executables into convention-named folder ---
-        if args.keep_non_executables:
-            print("[*] note: --keep-non-executables has no effect in directory mode")
-        print(f"[*] moving {len(exec_df)} executables -> {dest_path}")
-        t1 = time.perf_counter()
-        moved = _move_executables(winsxs_root, dest_path, exec_df)
-        print(f"[+] moved {moved} files in {time.perf_counter()-t1:.1f}s")
-
-    mode = "archive" if args.archive else "directory"
+    seven_zip = _resolve_seven_zip(args.seven_zip)
+    print(f"[*] compressing with {seven_zip} -> {archive_path}")
+    _compress(seven_zip, archive_path, winsxs_root)
+    archive_size_mb = archive_path.stat().st_size // (1024 * 1024)
+    print(f"[+] archive ready: {archive_path} ({archive_size_mb} MB)")
 
     _update_manifest(
         manifest_path,
         product_id=product_id,
         msrc_product_ids=msrc_product_ids,
         slug=args.slug,
-        archive_name=dest_name,
+        archive_name=archive_name,
         dataframe_name=bin_name,
         product_name=args.product_name,
         msrc_month=msrc_month,
-        mode=mode,
     )
 
     print("[+] done.")

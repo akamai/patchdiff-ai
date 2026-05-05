@@ -1,14 +1,22 @@
-"""`patchdiff-ai index` — index + pack a per-Windows-version WinSxS dump.
+"""`patchdiff-ai index` — index a per-Windows-version WinSxS dump.
 
-Replaces the host's ``C:\\Windows\\WinSxS`` baseline with a self-contained
-archive: hand it a WinSxS folder (typically extracted from a Windows
-install ISO) and it produces:
+Replaces the host's ``C:\\Windows\\WinSxS`` baseline with either a
+self-contained ``.7z`` archive or an on-disk directory entry. Hand it a
+WinSxS folder (typically extracted from a Windows install ISO) and it
+produces:
 
-* ``{product_id}.{slug}.bin`` — polars DataFrame indexing every executable
-  in the dump (path is relative to the archive root).
-* ``{product_id}.{slug}.7z`` — 7-zip archive containing only the
-  executables. Non-executables are deleted from the source folder
-  (destructive in-place) before compression to save storage.
+* ``{product_id}.{slug}.bin`` — polars DataFrame indexing every
+  executable in the dump (paths relative to the dump root).
+* ``--type directory`` (default) — skips compression. The cleaned-up
+  source folder stays where it is and the manifest entry points at it
+  (relative to ``windows_sxs_dir`` if the source lives there, else
+  absolute). Faster runs (no extract step), larger disk footprint, less
+  portable manifest.
+* ``--type archive`` — also writes ``{product_id}.{slug}.7z``: a 7-zip
+  archive of just the executables. Non-executables are deleted from the
+  source folder (destructive in-place) before compression to save
+  storage. Runtime extracts on demand into a tempdir per delta-apply
+  batch.
 
 Outputs are written to ``settings.paths.windows_sxs_dir`` (defaults to
 ``<data_root>/windows_sxs/``). The ``platforms.json`` manifest there is
@@ -18,7 +26,7 @@ created/updated to register the new platform — the runtime reads it via
 The MSRC ``productId``\\ s are resolved by tokenising ``--product-name``
 and finding every product in the monthly CVRF whose name is a token
 superset of the query; an interactive numbered menu lets multiple SKUs
-share one archive. The first selected entry becomes the
+share one entry. The first selected entry becomes the
 ``primary_product_id``. Pass ``--product-ids`` to skip the prompt.
 
 Idempotent: re-running on the same folder overwrites the .bin / .7z and
@@ -217,6 +225,7 @@ def _update_manifest(
     dataframe_name: str,
     product_name: str | None,
     msrc_month: str | None,
+    archive_type: str,
 ) -> None:
     """Insert / update an entry in `platforms.json`. Creates the file
     with a skeleton if missing."""
@@ -232,6 +241,7 @@ def _update_manifest(
         "slug": slug,
         "archive": archive_name,
         "dataframe": dataframe_name,
+        "type": archive_type,
         # Full set of MSRC product IDs that map to this archive — picked
         # interactively at index time (or passed via --product-ids).
         # `msrc_product_name_pattern` is the original query, kept verbatim
@@ -289,6 +299,17 @@ def _update_manifest(
     default=False,
     help="Skip the destructive cleanup (useful for a dry re-index).",
 )
+@click.option(
+    "--type",
+    "archive_type",
+    type=click.Choice(["archive", "directory"]),
+    default="directory",
+    show_default=True,
+    help="directory (default): leave files on disk and point the manifest "
+         "at the source folder (no compression; faster runs, larger "
+         "footprint, less portable). archive: compress source into a .7z "
+         "(portable, smaller; runtime extracts on demand).",
+)
 def index_command(
     winsxs_path: Path,
     product_name: str,
@@ -296,12 +317,16 @@ def index_command(
     msrc_month: str | None,
     product_ids: str | None,
     keep_non_executables: bool,
+    archive_type: str,
 ) -> None:
     settings = get_settings()
     settings.paths.ensure()
 
+    # 7-Zip is only required for archive mode; directory mode just walks
+    # the tree and writes the manifest, so don't gate the whole command
+    # on a missing 7z when the user opted out of compression.
     seven_zip = settings.tools.seven_zip
-    if not Path(seven_zip).exists():
+    if archive_type == "archive" and not Path(seven_zip).exists():
         raise click.ClickException(
             f"7-Zip not found at {seven_zip}. Set `tools.seven_zip` in config.json "
             f"or `TOOLS__SEVEN_ZIP=...` env var."
@@ -326,9 +351,7 @@ def index_command(
     out_dir = settings.paths.windows_sxs_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     bin_name = f"{product_id}.{slug}.bin"
-    archive_name = f"{product_id}.{slug}.7z"
     bin_path = out_dir / bin_name
-    archive_path = out_dir / archive_name
     manifest_path = out_dir / "platforms.json"
 
     click.echo(f"[*] indexing {winsxs_root} ...")
@@ -338,8 +361,10 @@ def index_command(
     if df.is_empty():
         raise click.ClickException("no files matched the WinSxS component-name regex; aborting.")
 
-    # Filter to executables for the persisted DataFrame. The .7z gets
-    # compressed AFTER the source dir is pruned, so its contents match.
+    # Filter to executables for the persisted DataFrame. In archive mode
+    # the .7z is compressed AFTER the source dir is pruned, so its
+    # contents match. In directory mode the live folder is pruned in
+    # place — same end state.
     exec_df = df.filter(
         pl.any_horizontal([
             pl.col("name").str.to_lowercase().str.ends_with(ext)
@@ -359,19 +384,35 @@ def index_command(
         freed = _cleanup_non_executables(winsxs_root)
         click.echo(f"[+] freed {freed // (1024 * 1024)} MB")
 
-    click.echo(f"[*] compressing with {seven_zip} -> {archive_path}")
-    _compress(Path(seven_zip), archive_path, winsxs_root)
-    archive_size_mb = archive_path.stat().st_size // (1024 * 1024)
-    click.echo(f"[+] archive ready: {archive_path} ({archive_size_mb} MB)")
+    if archive_type == "archive":
+        archive_field = f"{product_id}.{slug}.7z"
+        archive_path = out_dir / archive_field
+        click.echo(f"[*] compressing with {seven_zip} -> {archive_path}")
+        _compress(Path(seven_zip), archive_path, winsxs_root)
+        archive_size_mb = archive_path.stat().st_size // (1024 * 1024)
+        click.echo(f"[+] archive ready: {archive_path} ({archive_size_mb} MB)")
+    else:
+        # Manifest stores a relative path when the source lives under
+        # windows_sxs_dir (so moving the data root keeps things working);
+        # otherwise an absolute path. `Path("/manifest_dir") / "/abs"`
+        # returns the absolute right-hand side, so both forms resolve
+        # correctly via the `archive_dir / spec.archive` join in
+        # `WinsxsArchive.__init__`.
+        try:
+            archive_field = str(winsxs_root.relative_to(out_dir)).replace("\\", "/")
+        except ValueError:
+            archive_field = str(winsxs_root)
+        click.echo(f"[+] directory entry: {archive_field}")
 
     _update_manifest(
         manifest_path,
         product_id=product_id,
         msrc_product_ids=msrc_product_ids,
         slug=slug,
-        archive_name=archive_name,
+        archive_name=archive_field,
         dataframe_name=bin_name,
         product_name=product_name,
         msrc_month=msrc_month,
+        archive_type=archive_type,
     )
     click.echo("[+] done.")
