@@ -15,9 +15,10 @@ from typing import TYPE_CHECKING, Iterable
 import click
 import structlog
 
-from patchdiff_ai.config.settings import get_settings
+from patchdiff_ai.config.settings import Settings, get_settings
 from patchdiff_ai.observability.progress import make_reporter
 from patchdiff_ai.runtime.app_context import AppContext
+from patchdiff_ai.runtime.app_dirs import config_json_path
 from patchdiff_ai.runtime.cancel import run_cancellable
 from patchdiff_ai.runtime.orchestrator import run_cve
 
@@ -25,6 +26,37 @@ if TYPE_CHECKING:
     from patchdiff_ai.platforms.base import Platform
 
 log = structlog.get_logger(__name__)
+
+
+def _ensure_llm_configured(settings: Settings) -> None:
+    """Exit with a friendly hint when no LLM provider has credentials.
+
+    Without one of (Azure endpoint, Anthropic key, Gemini key) every
+    `for_purpose()` call fails with `ProviderUnavailableError` deep
+    inside the pipeline / chat. Catching it at the CLI boundary lets us
+    point users at `config.json` instead of dumping a stack trace —
+    especially relevant on first run, where the auto-created template is
+    blank and the user hasn't yet been told where it lives.
+    """
+    azure_set = bool(settings.azure.endpoint)
+    anthropic_set = settings.anthropic.api_key is not None
+    gemini_set = settings.gemini.api_key is not None
+    if azure_set or anthropic_set or gemini_set:
+        return
+
+    cfg = config_json_path()
+    click.echo(
+        "[!] No LLM provider configured. patchdiff-ai needs at least one of:\n"
+        "      Azure OpenAI  — set `azure.endpoint` (+ optional service-principal\n"
+        "                       creds, or `az login` for DefaultAzureCredential)\n"
+        "      Anthropic     — set `anthropic.api_key`\n"
+        "      Google Gemini — set `gemini.api_key`\n"
+        f"\n    Edit {cfg}\n"
+        "    or export the equivalent env vars (AZURE_ENDPOINT, "
+        "ANTHROPIC_API_KEY, GOOGLE_API_KEY).",
+        err=True,
+    )
+    raise click.exceptions.Exit(code=2)
 
 
 async def _run_one_cve_in_ctx(
@@ -67,6 +99,9 @@ def run_chat_only(*, permissive: bool = False) -> None:
     settings = get_settings()
     settings.paths.ensure()
     app_ctx = AppContext.build(settings)
+    # Check after `build()` so the auto-created config.json exists at
+    # the path the hint prints.
+    _ensure_llm_configured(settings)
     try:
         from patchdiff_ai.cli.chat import run_chat
 
@@ -99,6 +134,7 @@ def run_single_cve(
     settings = get_settings()
     settings.paths.ensure()
     app_ctx = AppContext.build(settings)
+    _ensure_llm_configured(settings)
 
     try:
         with make_reporter() as progress:
@@ -157,6 +193,7 @@ def run_batch_cves(
     settings = get_settings()
     settings.paths.ensure()
     app_ctx = AppContext.build(settings)
+    _ensure_llm_configured(settings)
     n_workers = max(1, settings.concurrency.cve_workers)
 
     async def _run_all() -> None:
