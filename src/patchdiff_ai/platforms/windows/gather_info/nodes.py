@@ -20,14 +20,14 @@ from pydantic import BaseModel, Field, ValidationError
 from patchdiff_ai.platforms.windows.gather_info.state import GatherInfoState
 from patchdiff_ai.llm.catalog import ModelPurpose
 from patchdiff_ai.llm.retry import resilient
-from patchdiff_ai.patches.extractor import extract_kb, extraction_marker, load_delta_dlls
+from patchdiff_ai.platforms.windows.extractor import extract_kb, extraction_marker, load_delta_dlls
 from patchdiff_ai.patches.files_collection import (
     file_desc,
     filter_executables,
     get_report,
     get_update_dataframe,
 )
-from patchdiff_ai.patches.kb_downloader import download_kb
+from patchdiff_ai.platforms.windows.kb_downloader import download_kb
 from patchdiff_ai.prompts.registry import PromptId, PromptRegistry
 from patchdiff_ai.runtime.app_context import AppContext
 from patchdiff_ai.runtime.timer import Timer
@@ -143,6 +143,7 @@ def make_nodes(ctx: AppContext):
             prev_df = await get_update_dataframe(
                 state.KB.previous,
                 prev_report,
+                root=state.extracted.previous,
                 cache=state.extracted.previous / "report.cache",
                 progress=prev_handle,
             )
@@ -154,6 +155,7 @@ def make_nodes(ctx: AppContext):
             curr_df = await get_update_dataframe(
                 state.KB.current,
                 curr_report,
+                root=state.extracted.current,
                 cache=state.extracted.current / "report.cache",
                 progress=curr_handle,
             )

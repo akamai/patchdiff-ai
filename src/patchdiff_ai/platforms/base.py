@@ -16,17 +16,19 @@ Two layers:
 from __future__ import annotations
 
 from enum import Enum
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     import click
+    import polars as pl
 
     from patchdiff_ai.graphs.pipeline.state import PipelineState
     from patchdiff_ai.prompts.registry import PromptId
     from patchdiff_ai.runtime.app_context import AppContext
     from patchdiff_ai.schemas.candidate import Candidate
     from patchdiff_ai.schemas.cve import CveDetails
+    from patchdiff_ai.schemas.patch_store import PatchStoreEntry
 
 
 class UnknownPlatform(KeyError):
@@ -121,6 +123,30 @@ class Platform(Protocol):
         end in a numeric suffix) or when a magic-byte check is
         cheaper / more accurate.
         """
+        ...
+
+    def is_baseline_cached(
+        self, row: dict, base_kb: str, patch_store_dir: Path
+    ) -> bool:
+        """True iff this subject's base-KB output is already in the
+        patch_store cache. Used by the router to skip baseline extraction
+        when nothing new is needed."""
+        ...
+
+    def apply_patch_for_subject(
+        self,
+        ctx: "AppContext",
+        row: dict,
+        *,
+        base_kb: str,
+        curr_kb: str,
+        prev_kb: str,
+        prev_df: "pl.DataFrame",
+        filtered_base_df: "pl.DataFrame",
+    ) -> tuple["PatchStoreEntry | None", "PatchStoreEntry | None", "PatchStoreEntry | None"]:
+        """Apply forward + reverse deltas for one candidate. Returns
+        (base, current, previous) entries; any may be None if patching
+        that side fails or yields no new artifact."""
         ...
 
 

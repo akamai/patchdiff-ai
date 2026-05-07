@@ -158,6 +158,7 @@ class PipelineRouter:
         patch_store_index = self.ctx.settings.paths.patch_store_index
         patch_store_df = get_patch_store_df(patch_store_index)
         platform_id = self.ctx.platform.name
+        ps_dir = self.ctx.settings.paths.patch_store_dir
 
         sends = []
         for row in subjects.iter_rows(named=True):
@@ -180,12 +181,20 @@ class PipelineRouter:
             if secondary is None:
                 continue
 
+            # Single absolutization boundary: rows leave the patch_store_df
+            # holding relative paths; downstream consumers (RE / VR / BinDiff
+            # / chat) open files via `Path(entry.path)` and need an absolute.
+            primary_entry = PatchStoreEntry.from_row(primary)
+            primary_entry.path = str(ps_dir / primary_entry.path)
+            secondary_entry = PatchStoreEntry.from_row(secondary)
+            secondary_entry.path = str(ps_dir / secondary_entry.path)
+
             sends.append(
                 Send(
                     PipelineNodeNames.RE_AGENT,
                     ReverseEngineeringState(
-                        primary_file=PatchStoreEntry.from_row(primary),
-                        secondary_file=PatchStoreEntry.from_row(secondary),
+                        primary_file=primary_entry,
+                        secondary_file=secondary_entry,
                     ).model_dump(),
                 )
             )
@@ -195,7 +204,6 @@ class PipelineRouter:
         from patchdiff_ai.graphs.pipeline.routing_helpers import (
             build_subjects_df,
         )  # local import to avoid cycle
-        from patchdiff_ai.patches.delta_apply import patch_entry
 
         subjects = build_subjects_df(state, ranked_df)
         if subjects is None or subjects.is_empty():
@@ -213,15 +221,13 @@ class PipelineRouter:
         #     pick the matching reverse-delta rows.
         # If every base-KB output is cached, `needed_rows` is empty and
         # `extract_baselines` short-circuits without spawning 7z.
-        from patchdiff_ai.patches.delta_apply import store_path
-
         filtered_base_df = state.filtered_dataframes.base
         ps_dir = self.ctx.settings.paths.patch_store_dir
         base_kb = state.KB.base
-        platform_id = self.ctx.platform.name
+        platform = self.ctx.platform
 
         def _base_missing(row: dict) -> bool:
-            return not (store_path(ps_dir, platform_id, row) / base_kb / row["name"]).exists()
+            return not platform.is_baseline_cached(row, base_kb, ps_dir)
 
         uncached = [s for s in subjects.iter_rows(named=True) if _base_missing(s)]
         if not uncached or filtered_base_df.is_empty():
@@ -240,11 +246,11 @@ class PipelineRouter:
             )
             needed_rows = needed.to_dicts()
 
-        async with self.ctx.platform.extract_baselines(needed_rows) as tmp:
+        async with platform.extract_baselines(needed_rows) as tmp:
             # Inside the with-block, rewrite filtered_base_df["path"] to
-            # the absolute extracted location. patch_entry reads `path`
-            # from the joined row exactly as before — the rewrite is
-            # transparent to it.
+            # the absolute extracted location. apply_patch_for_subject
+            # reads `path` from the joined row exactly as before — the
+            # rewrite is transparent to it.
             rewritten = filtered_base_df
             if needed_rows:
                 rewritten = filtered_base_df.with_columns(
@@ -257,11 +263,9 @@ class PipelineRouter:
             results = []
             for row in subjects.iter_rows(named=True):
                 try:
-                    base, curr, prev = patch_entry(
-                        self.ctx.tools.delta,
-                        self.ctx.settings.paths.patch_store_dir,
+                    base, curr, prev = platform.apply_patch_for_subject(
+                        self.ctx,
                         row,
-                        platform_id=platform_id,
                         base_kb=state.KB.base,
                         curr_kb=state.KB.current,
                         prev_kb=state.KB.previous,

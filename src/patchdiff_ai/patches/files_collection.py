@@ -1,5 +1,15 @@
 """KB-update DataFrame builders + PE descriptor utilities.
 
+This is the only remaining inhabitant of the platform-agnostic `patches/`
+namespace; every other former sibling now lives under
+`platforms/windows/` (kb_downloader, extractor, delta_apply,
+cve_enrichment, os_detection). Most helpers below are still
+WinSxS-shaped (`COMPONENT_RE`, `r/f/n` delta types, PE descriptors,
+executable extension filter) and are flagged for a future move into the
+Windows platform; only `file_hash` and `version_tuple` are truly
+cross-platform. They are kept here for now to avoid stomping on the
+import surface used by `platforms/windows/{index,recover_cache,gather_info/nodes,delta_apply}.py`.
+
 WinSxS used to be read off the host machine here. That code path is gone
 — the per-platform archives in `<data_root>/windows_sxs/` (one `.7z` +
 `.bin` per Windows release) are the only baseline source now. The
@@ -12,7 +22,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
-from typing import Generator, TYPE_CHECKING
+from typing import Generator, Iterable, TYPE_CHECKING
 
 import pefile
 import polars as pl
@@ -92,6 +102,45 @@ def get_files(
     return out
 
 
+def get_files_from_names(
+    kb: str,
+    names: Iterable[str],
+    progress: "ProgressHandle | None" = None,
+) -> list[dict]:
+    """Name-only sibling of `get_files` for sources that aren't on disk
+    yet (e.g. a WIM listing). Same row schema; `hash` is None and the
+    `path` column stores the input string verbatim (forward-slash,
+    component-rooted relative).
+    """
+    out: list[dict] = []
+    for raw in names:
+        if progress is not None:
+            progress.advance(1)
+        rel = raw.replace("\\", "/")
+        parts = rel.split("/")
+        if len(parts) < 2:
+            continue
+        component = None
+        for part in reversed(parts[:-1]):
+            component = COMPONENT_RE.match(part)
+            if component:
+                break
+        if component is None:
+            continue
+        gd = component.groupdict()
+        gd["version"] = version_tuple(gd["version"])
+        delta_type = parts[-2]
+        out.append({
+            "path": rel,
+            "name": parts[-1].lower(),
+            "kb": kb,
+            "hash": None,
+            "delta_type": delta_type if delta_type in ("r", "f", "n") else None,
+            **gd,
+        })
+    return out
+
+
 def generate_df(
     kb: str,
     paths: list[Path] | Path,
@@ -114,10 +163,40 @@ def generate_df(
     )
 
 
+def rebase_paths(df: pl.DataFrame, *, root: Path, to_relative: bool) -> pl.DataFrame:
+    """Rewrite the ``path`` column to/from a ``root``-relative form.
+
+    Cache files are user-portable: the on-disk form stores paths
+    relative to the extracted-KB root (forward slashes for cross-OS
+    parity), and the runtime form is the absolute path under the
+    current ``root``. Stale caches (foreign absolute paths, partial
+    extraction) are user-recovered via `patchdiff-ai windows
+    recover-cache`; the runtime path does not detect or branch on them.
+    """
+    if df.is_empty():
+        return df
+    if to_relative:
+        root_str = str(root.resolve())
+        return df.with_columns(
+            pl.col("path").map_elements(
+                lambda p: str(Path(p).resolve().relative_to(root_str)).replace("\\", "/"),
+                return_dtype=pl.Utf8,
+            )
+        )
+    root_resolved = root.resolve()
+    return df.with_columns(
+        pl.col("path").map_elements(
+            lambda p: str(root_resolved / p),
+            return_dtype=pl.Utf8,
+        )
+    )
+
+
 async def get_update_dataframe(
     kb: str,
     paths: list[Path] | Path,
     *,
+    root: Path | None = None,
     collect_hash: bool = True,
     cache: Path | None = None,
     progress: "ProgressHandle | None" = None,
@@ -128,9 +207,11 @@ async def get_update_dataframe(
 
     async with resource_lock(cache.resolve()):
         if cache.exists():
-            return pl.DataFrame.deserialize(cache)
+            cached = pl.DataFrame.deserialize(cache)
+            return cached if root is None else rebase_paths(cached, root=root, to_relative=False)
         df = generate_df(kb, paths, collect_hash, progress=progress)
-        safe_serialize(df, cache)
+        to_persist = rebase_paths(df, root=root, to_relative=True) if root is not None else df
+        safe_serialize(to_persist, cache)
     return df
 
 

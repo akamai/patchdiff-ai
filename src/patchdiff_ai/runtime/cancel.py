@@ -17,7 +17,7 @@ from typing import Awaitable, TypeVar
 import structlog
 
 from patchdiff_ai.observability.logging import write_traceback_to_file
-from patchdiff_ai.runtime.errors import DiskFullError
+from patchdiff_ai.runtime.errors import DiskFullError, KbCatalogUnavailableError
 
 log = structlog.get_logger(__name__)
 
@@ -56,6 +56,17 @@ def run_cancellable(coro: Awaitable[T]) -> T:
                 "disk_full",
                 path=str(exc.path),
                 free_mb=(exc.free_bytes // (1024 * 1024)) if exc.free_bytes else None,
+            )
+            sys.exit(1)
+        except KbCatalogUnavailableError as exc:
+            # Catalog can't deliver this KB. Single clean line; the hint
+            # carries the recovery suggestion.
+            log.error(
+                "kb_catalog_unavailable",
+                kb=exc.kb,
+                product=exc.product,
+                reason=exc.reason,
+                hint=exc.hint,
             )
             sys.exit(1)
         except BaseException as exc:

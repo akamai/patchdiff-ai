@@ -13,6 +13,8 @@ run `patchdiff-ai install` to bootstrap the remaining components (idalib + IDA
 | Windows Server 2025 (evaluation ISO) | https://software-static.download.prss.microsoft.com/pr/download/17763.737.190906-2324.rs5_release_svc_refresh_SERVERHYPERCORE_OEM_x64FRE_en-us_1.iso |
 | Windows 11 (ISO) | https://www.microsoft.com/en-gb/software-download/windows11 |
 
+Checkout the https://uupdump.net/ for older versions
+
 The Windows ISOs are used to build a local WinSxS index via
 `patchdiff-ai windows index <winsxs-dir> --product-name "..." --slug ...` — they
 are not bundled because of size.

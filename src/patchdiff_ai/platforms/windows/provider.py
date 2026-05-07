@@ -338,7 +338,7 @@ class WindowsProvider(PlatformProvider):
 
     def _fetch_msrc(self, cve_id: str):
         """Memoised MSRC report fetch shared across versions."""
-        from patchdiff_ai.patches.cve_enrichment import report
+        from patchdiff_ai.platforms.windows.cve_enrichment import report
         if cve_id not in self._msrc_cache:
             self._msrc_cache[cve_id] = report(cve_id)
         return self._msrc_cache[cve_id]

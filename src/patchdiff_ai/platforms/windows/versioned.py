@@ -50,7 +50,7 @@ class WindowsVersionedPlatform(Platform):
         self, state: "PipelineState", ctx: "AppContext"
     ) -> dict[str, Any]:
         from patchdiff_ai.graphs.pipeline.routing import Stage
-        from patchdiff_ai.patches.os_detection import processor_arch_tokens
+        from patchdiff_ai.platforms.windows.os_detection import processor_arch_tokens
         from patchdiff_ai.runtime.timer import Timer
 
         async with Timer("cve_enrichment"):
@@ -146,10 +146,40 @@ class WindowsVersionedPlatform(Platform):
     def extract_baselines(self, rows: list[dict]) -> AsyncContextManager[Path]:
         return self._archive.extract_baselines(rows)
 
+    # ----- Patching seam (consumed by graphs/pipeline/routing.py) -----------
+
+    def is_baseline_cached(self, row: dict, base_kb: str, patch_store_dir: Path) -> bool:
+        from patchdiff_ai.platforms.windows.delta_apply import store_path
+        return (store_path(patch_store_dir, self.name, row) / base_kb / row["name"]).exists()
+
+    def apply_patch_for_subject(
+        self,
+        ctx: "AppContext",
+        row: dict,
+        *,
+        base_kb: str,
+        curr_kb: str,
+        prev_kb: str,
+        prev_df: pl.DataFrame,
+        filtered_base_df: pl.DataFrame,
+    ):
+        from patchdiff_ai.platforms.windows.delta_apply import patch_entry
+        return patch_entry(
+            ctx.tools.delta,
+            ctx.settings.paths.patch_store_dir,
+            row,
+            platform_id=self.name,
+            base_kb=base_kb,
+            curr_kb=curr_kb,
+            prev_kb=prev_kb,
+            prev_df=prev_df,
+            filtered_base_df=filtered_base_df,
+        )
+
     # ----- Internal helpers --------------------------------------------------
 
     def _fetch_msrc(self, cve_id: str):
-        from patchdiff_ai.patches.cve_enrichment import report
+        from patchdiff_ai.platforms.windows.cve_enrichment import report
         if cve_id not in self._msrc_cache:
             self._msrc_cache[cve_id] = report(cve_id)
         return self._msrc_cache[cve_id]
