@@ -48,12 +48,12 @@ def _classify(cache: Path) -> tuple[str, pl.DataFrame | None]:
     """Decide whether `cache` needs a rebuild.
 
     Returns `(verdict, df)` where verdict is one of:
-      * "ok"      — paths resolve under the current extracted-KB root.
-      * "stale"   — paths don't resolve (foreign absolute paths from
-                    another machine, moved extraction tree, partially
-                    deleted contents); rebuild. Path-join semantics
-                    fold absolute strings through `cache.parent / sample`
-                    to themselves, so foreign abs paths land here too.
+      * "ok"      — relative paths that resolve under the current
+                    extracted-KB root.
+      * "stale"   — absolute paths (legacy format — pinned to whichever
+                    machine wrote them, won't survive a data-root move),
+                    OR relative paths that don't resolve (moved /
+                    partially deleted extraction tree); rebuild.
       * "broken"  — couldn't even deserialize; rebuild.
     `df` is the deserialized frame when available, else None.
     """
@@ -64,18 +64,27 @@ def _classify(cache: Path) -> tuple[str, pl.DataFrame | None]:
     if df.is_empty() or "path" not in df.columns:
         return "ok", df
     sample = df["path"][0]
+    if Path(sample).is_absolute():
+        return "stale", df
     if not (cache.parent / sample).exists():
         return "stale", df
     return "ok", df
 
 
-def _rebuild(cache: Path, *, dry_run: bool) -> bool:
-    """Rebuild a single `report.cache` from its sibling `report.txt`.
+def _infer_arch(df: pl.DataFrame | None, fallback: str) -> str:
+    """Pick the arch the original indexer used. The runtime indexer in
+    `gather_info/nodes.py` filters by a single `state.os.arch`, so the
+    cache only ever holds one arch — the dominant value from the stale
+    frame is the right one. ``fallback`` is used when the frame can't
+    be deserialized."""
+    if df is None or df.is_empty() or "arch" not in df.columns:
+        return fallback
+    counts = df["arch"].value_counts(sort=True)
+    return counts[0, "arch"]
 
-    Returns True on (would-be) success. The extracted-KB root is the
-    parent dir; we walk every arch present in `report.txt` so the
-    rebuilt cache matches whatever the original indexer produced.
-    """
+
+def _rebuild(cache: Path, df: pl.DataFrame | None, *, dry_run: bool, arch_fallback: str) -> bool:
+    """Rebuild a single `report.cache` from its sibling `report.txt`."""
     extracted = cache.parent
     report_txt = extracted / "report.txt"
     if not report_txt.exists():
@@ -83,37 +92,27 @@ def _rebuild(cache: Path, *, dry_run: bool) -> bool:
         return False
 
     kb = _kb_from_extracted_dir(extracted)
-
-    # `get_report` filters by arch; rebuild covers every arch listed
-    # in report.txt so we don't silently drop x86 entries on an x64 box.
-    arches = sorted({
-        line.split("_", 1)[0]
-        for line in report_txt.read_text().splitlines()
-        if "_" in line and line.split("_", 1)[0]
-    })
-    if not arches:
-        click.echo(f"  [!] {cache}: report.txt has no arch-prefixed entries — skipping")
+    arch = _infer_arch(df, arch_fallback)
+    paths = get_report(report_txt, arch)
+    if not paths:
+        click.echo(f"  [!] {cache}: no entries match arch={arch!r} in report.txt — skipping")
         return False
 
-    paths: list[Path] = []
-    for arch in arches:
-        paths.extend(get_report(report_txt, arch))
-
     if dry_run:
-        click.echo(f"  [=] would rebuild {cache} (arches={arches}, files={len(paths)})")
+        click.echo(f"  [=] would rebuild {cache} (arch={arch}, files={len(paths)})")
         return True
 
     t0 = time.perf_counter()
-    df = generate_df(kb, paths, collect_hash=True)
-    if df.is_empty():
+    df_new = generate_df(kb, paths, collect_hash=True)
+    if df_new.is_empty():
         click.echo(f"  [!] {cache}: indexer produced an empty frame — skipping")
         return False
 
     # Persist with the same relative-path convention `get_update_dataframe`
     # writes so the next runtime read goes through the fast path.
-    safe_serialize(rebase_paths(df, root=extracted, to_relative=True), cache)
+    safe_serialize(rebase_paths(df_new, root=extracted, to_relative=True), cache)
     click.echo(
-        f"  [+] rebuilt {cache} ({len(df)} rows, "
+        f"  [+] rebuilt {cache} ({len(df_new)} rows, "
         f"{time.perf_counter() - t0:.1f}s)"
     )
     return True
@@ -156,7 +155,14 @@ def _resolve_caches(target: Path) -> list[Path]:
     default=False,
     help="Report what would be rebuilt without touching anything.",
 )
-def recover_cache_command(path: Path, dry_run: bool) -> None:
+@click.option(
+    "--arch",
+    default="amd64",
+    show_default=True,
+    help="Fallback arch for caches that can't be deserialized; for stale "
+    "caches the arch is read from the existing frame.",
+)
+def recover_cache_command(path: Path, dry_run: bool, arch: str) -> None:
     caches = _resolve_caches(path)
     if not caches:
         click.echo(f"[*] no report.cache files found under {path}; nothing to do.")
@@ -170,7 +176,7 @@ def recover_cache_command(path: Path, dry_run: bool) -> None:
     click.echo(f"[*] scanning {len(caches)} cache file(s) under {path} ...")
     counts = {"ok": 0, "stale": 0, "broken": 0, "rebuilt": 0, "failed": 0}
     for cache in caches:
-        verdict, _df = _classify(cache)
+        verdict, df = _classify(cache)
         counts[verdict] += 1
         try:
             rel = cache.relative_to(display_root)
@@ -180,7 +186,7 @@ def recover_cache_command(path: Path, dry_run: bool) -> None:
             click.echo(f"  [.] {rel}: ok")
             continue
         click.echo(f"  [*] {rel}: {verdict}")
-        if _rebuild(cache, dry_run=dry_run):
+        if _rebuild(cache, df, dry_run=dry_run, arch_fallback=arch):
             if not dry_run:
                 counts["rebuilt"] += 1
         else:
