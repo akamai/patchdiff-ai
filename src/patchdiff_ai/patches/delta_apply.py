@@ -29,6 +29,15 @@ def store_path(patch_store_dir: Path, platform_id: str, entry: dict) -> Path:
     return patch_store_dir / platform_id / folder / entry["name"]
 
 
+def _entry_path_relative(patch_store_dir: Path, abs_path: Path) -> str:
+    """Forward-slashed relative form for `PatchStoreEntry.path` storage.
+
+    The dataframe holds relative-to-``patch_store_dir`` strings; the
+    pipeline absolutizes once at the routing→RE boundary.
+    """
+    return str(abs_path.relative_to(patch_store_dir)).replace("\\", "/")
+
+
 def _apply_forward(
     delta: DeltaApi,
     base_bytes: bytes,
@@ -150,7 +159,7 @@ def patch_entry(
         log.debug("base_copied", name=entry["name"], has_r_delta=r_delta_bytes is not None)
 
         base_entry = PatchStoreEntry.from_row(row)
-        base_entry.path = str(base_kb_path / entry["name"])
+        base_entry.path = _entry_path_relative(patch_store_dir, base_kb_path / entry["name"])
         base_entry.kb = base_kb
         base_entry.hash = file_hash(base)
         base_entry.ms_id = get_pe_ms_id(base)
@@ -169,7 +178,7 @@ def patch_entry(
             (base_path / curr_kb).mkdir(parents=True, exist_ok=True)
             (base_path / curr_kb / entry["name"]).write_bytes(np)
             curr_entry = PatchStoreEntry.from_row(entry)
-            curr_entry.path = str(base_path / curr_kb / entry["name"])
+            curr_entry.path = _entry_path_relative(patch_store_dir, base_path / curr_kb / entry["name"])
             curr_entry.kb = curr_kb
             curr_entry.hash = file_hash(np)
             curr_entry.ms_id = get_pe_ms_id(np)
@@ -200,7 +209,7 @@ def patch_entry(
                 (base_path / prev_kb / entry["name"]).write_bytes(op)
                 row = old_patch.row(0, named=True)
                 prev_entry = PatchStoreEntry.from_row(row)
-                prev_entry.path = str(base_path / prev_kb / entry["name"])
+                prev_entry.path = _entry_path_relative(patch_store_dir, base_path / prev_kb / entry["name"])
                 prev_entry.kb = prev_kb
                 prev_entry.hash = file_hash(op)
                 prev_entry.ms_id = get_pe_ms_id(op)

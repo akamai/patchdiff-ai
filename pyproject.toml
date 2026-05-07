@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "patchdiff-ai"
-version = "2.0.13"
+version = "2.0.14"
 description = "Turn a CVE ID into a binary-diff root-cause-analysis report — MSRC patches, IDA Pro + BinDiff, LLM-driven RE."
 readme = "readme.md"
 requires-python = ">=3.11"

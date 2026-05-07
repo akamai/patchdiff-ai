@@ -1,6 +1,6 @@
 """Click sub-group mounted as `patchdiff-ai windows ...`.
 
-Owns six commands:
+Owns the platform-specific commands:
 
 * `cve <CVE-ID> [--platform-id N]` — single-CVE run forced through
   the Windows path (skips NVD auto-detect).
@@ -9,6 +9,7 @@ Owns six commands:
 * `install` — run `WindowsProvider.install()`.
 * `month <YYYY-MMM> [--platform-id N]` — Patch Tuesday batch run.
 * `month-stats <YYYY-MMM>` — aggregate cached-report stats for a cycle.
+* `recover-cache` — rebuild stale `report.cache` files under the temp dir.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from patchdiff_ai.platforms.windows.cycle import (
 )
 from patchdiff_ai.platforms.windows.index import index_command
 from patchdiff_ai.platforms.windows.month_stats import month_stats_command
+from patchdiff_ai.platforms.windows.recover_cache import recover_cache_command
 
 if TYPE_CHECKING:
     from patchdiff_ai.platforms.base import Platform
@@ -43,6 +45,7 @@ def build_windows_group(provider: "WindowsProvider") -> click.Group:
     grp = click.Group(name=provider.name, help="Windows (MSRC) operations.")
     grp.add_command(index_command)
     grp.add_command(month_stats_command)
+    grp.add_command(recover_cache_command)
 
     @grp.command("health-check", help="Validate Windows-side prerequisites.")
     def _hc() -> None:

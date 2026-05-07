@@ -143,6 +143,7 @@ def make_nodes(ctx: AppContext):
             prev_df = await get_update_dataframe(
                 state.KB.previous,
                 prev_report,
+                root=state.extracted.previous,
                 cache=state.extracted.previous / "report.cache",
                 progress=prev_handle,
             )
@@ -154,6 +155,7 @@ def make_nodes(ctx: AppContext):
             curr_df = await get_update_dataframe(
                 state.KB.current,
                 curr_report,
+                root=state.extracted.current,
                 cache=state.extracted.current / "report.cache",
                 progress=curr_handle,
             )

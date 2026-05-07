@@ -114,10 +114,40 @@ def generate_df(
     )
 
 
+def rebase_paths(df: pl.DataFrame, *, root: Path, to_relative: bool) -> pl.DataFrame:
+    """Rewrite the ``path`` column to/from a ``root``-relative form.
+
+    Cache files are user-portable: the on-disk form stores paths
+    relative to the extracted-KB root (forward slashes for cross-OS
+    parity), and the runtime form is the absolute path under the
+    current ``root``. Stale caches (foreign absolute paths, partial
+    extraction) are user-recovered via `patchdiff-ai windows
+    recover-cache`; the runtime path does not detect or branch on them.
+    """
+    if df.is_empty():
+        return df
+    if to_relative:
+        root_str = str(root.resolve())
+        return df.with_columns(
+            pl.col("path").map_elements(
+                lambda p: str(Path(p).resolve().relative_to(root_str)).replace("\\", "/"),
+                return_dtype=pl.Utf8,
+            )
+        )
+    root_resolved = root.resolve()
+    return df.with_columns(
+        pl.col("path").map_elements(
+            lambda p: str(root_resolved / p),
+            return_dtype=pl.Utf8,
+        )
+    )
+
+
 async def get_update_dataframe(
     kb: str,
     paths: list[Path] | Path,
     *,
+    root: Path | None = None,
     collect_hash: bool = True,
     cache: Path | None = None,
     progress: "ProgressHandle | None" = None,
@@ -128,9 +158,11 @@ async def get_update_dataframe(
 
     async with resource_lock(cache.resolve()):
         if cache.exists():
-            return pl.DataFrame.deserialize(cache)
+            cached = pl.DataFrame.deserialize(cache)
+            return cached if root is None else rebase_paths(cached, root=root, to_relative=False)
         df = generate_df(kb, paths, collect_hash, progress=progress)
-        safe_serialize(df, cache)
+        to_persist = rebase_paths(df, root=root, to_relative=True) if root is not None else df
+        safe_serialize(to_persist, cache)
     return df
 
 

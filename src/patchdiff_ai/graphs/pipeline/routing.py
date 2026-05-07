@@ -158,6 +158,7 @@ class PipelineRouter:
         patch_store_index = self.ctx.settings.paths.patch_store_index
         patch_store_df = get_patch_store_df(patch_store_index)
         platform_id = self.ctx.platform.name
+        ps_dir = self.ctx.settings.paths.patch_store_dir
 
         sends = []
         for row in subjects.iter_rows(named=True):
@@ -180,12 +181,20 @@ class PipelineRouter:
             if secondary is None:
                 continue
 
+            # Single absolutization boundary: rows leave the patch_store_df
+            # holding relative paths; downstream consumers (RE / VR / BinDiff
+            # / chat) open files via `Path(entry.path)` and need an absolute.
+            primary_entry = PatchStoreEntry.from_row(primary)
+            primary_entry.path = str(ps_dir / primary_entry.path)
+            secondary_entry = PatchStoreEntry.from_row(secondary)
+            secondary_entry.path = str(ps_dir / secondary_entry.path)
+
             sends.append(
                 Send(
                     PipelineNodeNames.RE_AGENT,
                     ReverseEngineeringState(
-                        primary_file=PatchStoreEntry.from_row(primary),
-                        secondary_file=PatchStoreEntry.from_row(secondary),
+                        primary_file=primary_entry,
+                        secondary_file=secondary_entry,
                     ).model_dump(),
                 )
             )

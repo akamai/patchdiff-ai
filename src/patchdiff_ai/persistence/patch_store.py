@@ -62,6 +62,12 @@ def safe_serialize(df: pl.DataFrame, path: Path, format: str = "binary") -> None
 
 
 def get_patch_store_df(path: Path) -> pl.DataFrame:
+    """Load the master patch-store index.
+
+    The ``path`` column is stored relative to ``paths.patch_store_dir``
+    (forward-slashed). Callers absolutize at the boundary where rows
+    leave the dataframe — see ``graphs/pipeline/routing.py``.
+    """
     if path.exists():
         return pl.DataFrame.deserialize(path)
     df = pl.DataFrame([PatchStoreEntry().to_row()])
