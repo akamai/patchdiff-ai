@@ -20,7 +20,11 @@ from tenacity import (
 )
 
 from patchdiff_ai.persistence.patch_store import resource_lock
-from patchdiff_ai.runtime.errors import DiskFullError, free_bytes_for
+from patchdiff_ai.runtime.errors import (
+    DiskFullError,
+    KbCatalogUnavailableError,
+    free_bytes_for,
+)
 
 if TYPE_CHECKING:
     from patchdiff_ai.observability.progress import ProgressHandle
@@ -62,7 +66,8 @@ def _find_uid(session: HTMLSession, kb: str, product: str) -> str:
     )
     target_tokens = set(re.findall(r"[a-z0-9]+", target))
     best_score, best_uid = -1, None
-    for a in resp.html.find("a[onclick^='goToDetails']"):
+    anchors = resp.html.find("a[onclick^='goToDetails']")
+    for a in anchors:
         m = UID_PAT.search(a.attrs.get("onclick", ""))
         if not m:
             continue
@@ -71,17 +76,48 @@ def _find_uid(session: HTMLSession, kb: str, product: str) -> str:
         if s > best_score:
             best_score, best_uid = s, m.group(1)
     if best_uid is None:
-        raise RuntimeError(f"UID not found for {kb} / {product}")
+        # An empty anchor list means the catalog returned the search
+        # page with no result rows at all — distinct from "rows present
+        # but none scored a product-name overlap".
+        if not anchors:
+            raise KbCatalogUnavailableError(
+                kb,
+                product,
+                reason="empty",
+                hint=(
+                    "Microsoft Update Catalog returned no rows for this KB. "
+                    "Drop a downloaded .msu into the KB cache directory to "
+                    "bypass the catalog lookup."
+                ),
+            )
+        raise KbCatalogUnavailableError(
+            kb,
+            product,
+            reason="no_match",
+            hint=(
+                f"{len(anchors)} catalog row(s) matched the KB but none "
+                f"matched the product name."
+            ),
+        )
     return best_uid
 
 
-def _find_msu(session: HTMLSession, uid: str, kb_num: str) -> str:
+def _find_msu(session: HTMLSession, uid: str, kb_num: str, product: str) -> str:
     payload = {"updateIDs": f'[{{"uidInfo":"{uid}","updateID":"{uid}"}}]'}
     html = session.post(DL_URL, data=payload, timeout=30).text
     pat = re.compile(rf"https://[^'\"\s]*kb{kb_num}[^'\"\s]*\.(?:msu|cab)", re.I)
     m = pat.search(html)
     if not m:
-        raise RuntimeError("MSU link not found")
+        raise KbCatalogUnavailableError(
+            f"KB{kb_num}",
+            product,
+            reason="no_msu",
+            hint=(
+                "DownloadDialog returned no .msu/.cab URL for the resolved "
+                "UID. Drop a downloaded .msu into the KB cache directory "
+                "to bypass the download dialog."
+            ),
+        )
     return m.group(0)
 
 
@@ -221,5 +257,5 @@ async def download_kb(
     session.cookies.set("display-culture", "en-US")
 
     uid = await asyncio.to_thread(_find_uid, session, kb, product)
-    url = await asyncio.to_thread(_find_msu, session, uid, kb_num)
+    url = await asyncio.to_thread(_find_msu, session, uid, kb_num, product)
     return await _grab(ctx, session, url, out_dir, overwrite)
