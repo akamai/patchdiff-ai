@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
-from typing import Generator, TYPE_CHECKING
+from typing import Generator, Iterable, TYPE_CHECKING
 
 import pefile
 import polars as pl
@@ -89,6 +89,45 @@ def get_files(
             out.append(row)
         except PermissionError as exc:
             log.debug("permission_error", path=str(p), error=str(exc))
+    return out
+
+
+def get_files_from_names(
+    kb: str,
+    names: Iterable[str],
+    progress: "ProgressHandle | None" = None,
+) -> list[dict]:
+    """Name-only sibling of `get_files` for sources that aren't on disk
+    yet (e.g. a WIM listing). Same row schema; `hash` is None and the
+    `path` column stores the input string verbatim (forward-slash,
+    component-rooted relative).
+    """
+    out: list[dict] = []
+    for raw in names:
+        if progress is not None:
+            progress.advance(1)
+        rel = raw.replace("\\", "/")
+        parts = rel.split("/")
+        if len(parts) < 2:
+            continue
+        component = None
+        for part in reversed(parts[:-1]):
+            component = COMPONENT_RE.match(part)
+            if component:
+                break
+        if component is None:
+            continue
+        gd = component.groupdict()
+        gd["version"] = version_tuple(gd["version"])
+        delta_type = parts[-2]
+        out.append({
+            "path": rel,
+            "name": parts[-1].lower(),
+            "kb": kb,
+            "hash": None,
+            "delta_type": delta_type if delta_type in ("r", "f", "n") else None,
+            **gd,
+        })
     return out
 
 
