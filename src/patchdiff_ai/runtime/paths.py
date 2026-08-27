@@ -6,7 +6,7 @@ bundled-resource location lives here.
 
 Two layouts are supported:
 
-* **Wheel install** (`pip install patchdiff-ai` / `pip install git+...`):
+* **Wheel install** (`pip install git+https://github.com/akamai/patchdiff-ai`):
   hatchling's `force-include` projects `resources/bindiff_ida_9.3/` into
   `<package>/_resources/bindiff_ida_9.3/` so the DLLs travel with the
   wheel.
