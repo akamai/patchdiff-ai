@@ -63,7 +63,7 @@ dependencies = [
     "pefile==2024.8.26",
     "polars==1.40.1",
     "pydantic==2.13.3",
-    "pydantic-settings==2.14.0",
+    "pydantic-settings==2.14.2",
     "python-bindiff==0.3.4",
     "python-binexport==0.4.2",
     "python-dateutil==2.9.0.post0",
